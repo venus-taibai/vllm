@@ -280,6 +280,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
+    separate_reasoning: bool = False
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params

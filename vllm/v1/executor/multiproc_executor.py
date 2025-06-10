@@ -38,7 +38,8 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
-EXECUTE_MODEL_TIMEOUT_S = 40
+# NOTE: tmp fix for rpc timeout
+EXECUTE_MODEL_TIMEOUT_S = int(os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_S", "40"))
 
 
 class MultiprocExecutor(Executor):

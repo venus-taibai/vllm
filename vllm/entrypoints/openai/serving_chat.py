@@ -60,6 +60,7 @@ class OpenAIServingChat(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_reasoning: bool = False,
         reasoning_parser: Optional[str] = None,
+        reasoning_padding: Optional[str] = None,
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
@@ -69,7 +70,7 @@ class OpenAIServingChat(OpenAIServing):
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
-
+        self.reasoning_padding = reasoning_padding
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -425,6 +426,7 @@ class OpenAIServingChat(OpenAIServing):
 
         should_stream_with_reasoning_parsing = (
             self._should_stream_with_reasoning_parsing(request))
+        separate_reasoning = request.separate_reasoning
 
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned: Optional[list[bool]] = None
@@ -451,7 +453,8 @@ class OpenAIServingChat(OpenAIServing):
             # already ensures that the reasoning_parser is not None.
             # but the pre-commit hook requires it.
             if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser is not None:
+                self.reasoning_parser is not None and \
+                    separate_reasoning:
                 reasoning_parser = self.reasoning_parser(tokenizer)
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -501,12 +504,16 @@ class OpenAIServingChat(OpenAIServing):
 
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
+
+                    first_chunk_padding = self.reasoning_padding
+                    first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
+
                     for i in range(num_choices):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(
                                 role=role,
-                                content="",
+                                content=first_chunk_content,
                             ),
                             logprobs=None,
                             finish_reason=None)
@@ -605,7 +612,7 @@ class OpenAIServingChat(OpenAIServing):
                     if tool_choice_function_name:
                         if (self.enable_reasoning
                                 and not reasoning_parser.is_reasoning_end(
-                                    previous_token_ids)):
+                                    previous_token_ids) and separate_reasoning):
                             assert reasoning_parser is not None
                             delta_message = (
                                 reasoning_parser.
@@ -660,7 +667,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser
-                    elif tool_choice_auto and self.enable_reasoning:
+                    elif tool_choice_auto and self.enable_reasoning and separate_reasoning:
                         assert tool_parser is not None
                         assert reasoning_parser is not None
                         assert added_content_delta_arr is not None
@@ -728,7 +735,7 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_token_ids=output.token_ids,
                                 request=request))
                     # when only reasoning
-                    elif self.enable_reasoning:
+                    elif self.enable_reasoning and separate_reasoning:
                         assert reasoning_parser is not None
                         delta_message = (reasoning_parser.
                                          extract_reasoning_content_streaming(
@@ -898,7 +905,6 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
-
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
@@ -919,6 +925,8 @@ class OpenAIServingChat(OpenAIServing):
         for output in final_res.outputs:
             token_ids = output.token_ids
             out_logprobs = output.logprobs
+            if self.reasoning_padding and output.text is not None:
+                output.text = f"{self.reasoning_padding}\n{output.text}"
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -934,6 +942,8 @@ class OpenAIServingChat(OpenAIServing):
 
             should_stream_with_reasoning_parsing = (
                 self._should_stream_with_reasoning_parsing(request))
+            
+            separate_reasoning = request.separate_reasoning
 
             # In the OpenAI API the finish_reason is "tools_called"
             # if the tool choice is auto and the model produced a tool
@@ -941,7 +951,8 @@ class OpenAIServingChat(OpenAIServing):
             auto_tools_called = False
 
             if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser is not None:
+                self.reasoning_parser is not None and \
+                    separate_reasoning:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer)
                 except RuntimeError as e:

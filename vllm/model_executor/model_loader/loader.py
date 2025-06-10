@@ -57,7 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_files_not_needed_for_inference, get_gguf_extra_tensor_names,
     get_lock, gguf_quant_weights_iterator, initialize_dummy_weights,
     np_cache_weights_iterator, pt_weights_iterator,
-    runai_safetensors_weights_iterator, safetensors_weights_iterator)
+    runai_safetensors_weights_iterator, safetensors_weights_iterator, prefetch_weight_files)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.s3_utils import glob as s3_glob
@@ -285,7 +285,7 @@ class DefaultModelLoader(BaseModelLoader):
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
-        if load_format == LoadFormat.AUTO:
+        if load_format == LoadFormat.AUTO or load_format == LoadFormat.PREFETCH_AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
         elif (load_format == LoadFormat.SAFETENSORS
               or load_format == LoadFormat.FASTSAFETENSORS):
@@ -376,11 +376,15 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             else:
+                if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
+                    prefetch_weight_files(hf_weights_files)
                 weights_iterator = safetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
         else:
+            if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
+                prefetch_weight_files(hf_weights_files)
             weights_iterator = pt_weights_iterator(
                 hf_weights_files,
                 self.load_config.use_tqdm_on_load,

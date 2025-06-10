@@ -45,6 +45,7 @@ from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
                     overload)
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import cachetools
@@ -609,6 +610,16 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    # Brackets are not permitted in ipv4 addresses,
+    # see https://github.com/python/cpython/issues/103848
+    return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
+
+
+def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -2278,6 +2289,27 @@ def get_exception_traceback():
     return err_str
 
 
+def split_zmq_path(path: str) -> Tuple[str, str, str]:
+    """Split a zmq path into its parts."""
+    parsed = urlparse(path)
+    if not parsed.scheme:
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = str(parsed.port or "")
+
+    if scheme == "tcp" and not all((host, port)):
+        # The host and port fields are required for tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    if scheme != "tcp" and port:
+        # port only makes sense with tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    return scheme, host, port
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
@@ -2285,6 +2317,7 @@ def make_zmq_socket(
     socket_type: Any,
     bind: Optional[bool] = None,
     identity: Optional[bytes] = None,
+    linger: Optional[int] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2304,7 +2337,7 @@ def make_zmq_socket(
         buf_size = -1  # Use system default buffer size
 
     if bind is None:
-        bind = socket_type != zmq.PUSH
+        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -2316,6 +2349,15 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        socket.setsockopt(zmq.LINGER, linger)
+
+    # Determine if the path is a TCP socket with an IPv6 address.
+    # Enable IPv6 on the zmq socket if so.
+    scheme, host, _ = split_zmq_path(path)
+    if scheme == "tcp" and is_valid_ipv6_address(host):
+        socket.setsockopt(zmq.IPV6, 1)
 
     if bind:
         socket.bind(path)
