@@ -298,6 +298,17 @@ class PrometheusStatLogger(StatLoggerBase):
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
+        # request_tpot_time
+        self.histogram_request_avg_tpot_time = \
+            prometheus_client.Histogram(
+                name="vllm:request_avg_tpot_time",
+                documentation="Histogram of Average token output time per request",
+                buckets=[
+                    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
+                ],
+                labelnames=labelnames).labels(*labelvalues)
+
         self.histogram_time_per_output_token = \
             self._histogram_cls(
                 name="vllm:time_per_output_token_seconds",
@@ -434,6 +445,8 @@ class PrometheusStatLogger(StatLoggerBase):
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason].inc()
+            self.histogram_request_avg_tpot_time.observe(
+                finished_request.request_avg_tpot_time)
             self.histogram_e2e_time_request.observe(
                 finished_request.e2e_latency)
             self.histogram_queue_time_request.observe(

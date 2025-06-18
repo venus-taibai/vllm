@@ -433,6 +433,7 @@ class EngineArgs:
         get_field(VllmConfig, "additional_config")
     enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
+    reasoning_padding: Optional[str] = None
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
@@ -606,6 +607,9 @@ class EngineArgs:
             # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
+        guided_decoding_group.add_argument(
+            "--reasoning-padding",
+            help="Output padding for reasoning models before generation, e.g. '<think>\n'")
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
