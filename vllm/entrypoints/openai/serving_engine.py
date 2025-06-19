@@ -556,21 +556,28 @@ class OpenAIServing:
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = getattr(request, "max_tokens", None)
-        if max_tokens is None:
-            if token_num >= self.max_model_len:
-                raise ValueError(
-                    f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the messages, "
-                    f"Please reduce the length of the messages.")
-        elif token_num + max_tokens > self.max_model_len:
+
+        if token_num >= self.max_model_len:
             raise ValueError(
+                f"This model's maximum context length is "
+                f"{self.max_model_len} tokens. However, you requested "
+                f"{token_num} tokens in the messages, "
+                f"Please reduce the length of the messages.")
+
+        if max_tokens is not None and token_num + max_tokens > self.max_model_len:
+            truncated_max_tokens = self.max_model_len - token_num
+            logger.warning(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
                 f"{max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
                 f"{max_tokens} in the completion). "
-                f"Please reduce the length of the messages or completion.")
+                f"Theta vllm-ascend(530 version) will automatically truncate the "
+                f"output tokens to {truncated_max_tokens} to fit the model's context length. "
+                "This temporary solution will be deprecated after 630.")
+            request.max_tokens = truncated_max_tokens
+            if isinstance(request, ChatCompletionRequest):
+                request.max_completion_tokens = truncated_max_tokens
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 

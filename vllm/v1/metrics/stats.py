@@ -76,6 +76,8 @@ class FinishedRequestStats:
     prefill_time: float = 0.0
     inference_time: float = 0.0
     decode_time: float = 0.0
+    # request tpot time
+    request_avg_tpot_time: float = 0.0
 
 
 class IterationStats:
@@ -167,6 +169,12 @@ class IterationStats:
         # Any preemptions during prefill or decode are included
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
+        # request_tpot_time
+        if req_stats.num_generation_tokens > 1:
+            request_avg_tpot_time = decode_time / (req_stats.num_generation_tokens - 1)
+        else:
+            request_avg_tpot_time = 0
+
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
                                  e2e_latency=e2e_latency,
@@ -176,7 +184,8 @@ class IterationStats:
                                  queued_time=queued_time,
                                  prefill_time=prefill_time,
                                  inference_time=inference_time,
-                                 decode_time=decode_time)
+                                 decode_time=decode_time,
+                                 request_avg_tpot_time=request_avg_tpot_time)
         self.finished_requests.append(finished_req)
 
 
