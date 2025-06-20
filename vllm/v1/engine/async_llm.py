@@ -493,6 +493,15 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
+    async def start_expert_distribution_record(self):
+        await self.engine_core.expert_distribution_record_async(is_start=True)
+
+    async def stop_expert_distribution_record(self):
+        await self.engine_core.expert_distribution_record_async(is_start=False)
+
+    async def dump_expert_distribution_record(self):
+        await self.engine_core.dump_expert_distribution_record_async()
+
     async def reset_mm_cache(self) -> None:
         self.processor.mm_registry.reset_processor_cache()
         self.processor.mm_input_cache_client.reset()

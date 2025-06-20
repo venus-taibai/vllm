@@ -293,6 +293,12 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
+    def expert_distribution_record(self, is_start: bool) -> None:
+        self.model_executor.expert_distribution_record(is_start)
+
+    def dump_expert_distribution_record(self) -> None:
+        self.model_executor.dump_expert_distribution_record()
+
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
