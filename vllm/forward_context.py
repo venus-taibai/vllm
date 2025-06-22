@@ -38,14 +38,11 @@ class DPMetadata:
         Gather the num_tokens across all DP ranks and return results in a
         CPU tensor of size dp_size.
         """
-        num_tokens_across_dp = [0] * dp_size
-        num_tokens_across_dp[dp_rank] = num_tokens
-        num_tokens_tensor = torch.tensor(num_tokens_across_dp,
-                                         device="cpu",
-                                         dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
-        return num_tokens_tensor
+        local_tensor = torch.tensor([num_tokens], dtype=torch.int32, device="npu")
+        num_tokens_tensor = torch.empty(dp_size, dtype=torch.int32, device="npu")
+        dist.all_gather_into_tensor(num_tokens_tensor, local_tensor, group=get_dp_group().device_group)
+        return num_tokens_tensor.cpu()
 
     @staticmethod
     def make(
