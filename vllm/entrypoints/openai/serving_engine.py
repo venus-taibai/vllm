@@ -744,6 +744,22 @@ class OpenAIServing:
             for request_prompt_text in request_prompts_text
         ]
 
+        if len(engine_prompts_text) > 1:
+            raise NotImplementedError(
+                "Batching of multiple prompts is not supported for "
+                "completion requests. Please use a single prompt.")
+
+        kv_transfer_params = request.kv_transfer_params
+        if kv_transfer_params is not None and \
+            kv_transfer_params.get("do_remote_prefill", False):
+            last_token_id = kv_transfer_params.get("last_token_id", None)
+            if last_token_id is None:
+                raise ValueError(
+                    "In disaggregated prefill mode, "
+                    "kv_transfer_params must contain the 'last_token_id' key, "
+                    f"but received: {kv_transfer_params}")
+            engine_prompts_text[0]["prompt_token_ids"] += [last_token_id]
+
         # This check is equivalent to simply checking if
         # `request_prompts_embeds` is empty, but it's difficult to propagate
         # overloads to the private helper functions to enable this check.
@@ -853,6 +869,18 @@ class OpenAIServing:
             prompt_inputs = TextTokensPrompt(
                 prompt=tokenizer.decode(request_prompt),
                 prompt_token_ids=request_prompt)
+
+        prompt_token_ids = prompt_inputs["prompt_token_ids"]
+        kv_transfer_params = request.kv_transfer_params
+        if kv_transfer_params is not None and \
+            kv_transfer_params.get("do_remote_prefill", False):
+            last_token_id = kv_transfer_params.get("last_token_id", None)
+            if last_token_id is None:
+                raise ValueError(
+                    "In disaggregated prefill mode, "
+                    "kv_transfer_params must contain the 'last_token_id' key, "
+                    f"but received: {kv_transfer_params}")
+            prompt_token_ids += [last_token_id]
 
         engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
