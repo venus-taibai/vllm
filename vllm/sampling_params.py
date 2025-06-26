@@ -219,6 +219,7 @@ class SamplingParams(
     max_tokens: Optional[int] = 16
     min_tokens: int = 0
     logprobs: Optional[int] = None
+    logprobs_in_trace: Optional[int] = None
     prompt_logprobs: Optional[int] = None
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does

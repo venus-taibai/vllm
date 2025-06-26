@@ -69,6 +69,7 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
+    logprobs_tensors_for_trace: Optional[LogprobsTensors]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -105,12 +106,15 @@ class ModelRunnerOutput:
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
 
+    logprobs_tensors_for_trace: Optional[LogprobsLists] = None
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
                                               spec_token_ids=None,
                                               logprobs=None,
+                                              logprobs_tensors_for_trace=None,
                                               prompt_logprobs_dict={},
                                               finished_sending=None,
                                               finished_recving=None)

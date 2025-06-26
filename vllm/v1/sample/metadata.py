@@ -22,6 +22,7 @@ class SamplingMetadata:
 
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: Optional[int]
+    max_num_logprobs_in_trace: Optional[int]
 
     no_penalties: bool
     prompt_token_ids: Optional[torch.Tensor]

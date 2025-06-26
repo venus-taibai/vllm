@@ -4,13 +4,15 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Mapping, Optional, Union
+import json
 
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.tracing import (Tracer, SpanKind, SpanAttributes, extract_trace_context)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.utils import compress_and_encode
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -464,6 +466,16 @@ class OutputProcessor:
             span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time)
             span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time)
             span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time)
+
+            if req_state.logprobs_processor:
+                logprobs_processor = req_state.logprobs_processor
+                if logprobs_processor.candidate_token_ids:
+                    span.set_attribute(SpanAttributes.GEN_AI_CANDIDATE_TOKEN_IDS,compress_and_encode(json.dumps(logprobs_processor.candidate_token_ids)))
+                if logprobs_processor.candidate_decoded_tokens:
+                    span.set_attribute(SpanAttributes.GEN_AI_CANDIDATE_DECODED_TOKENS,compress_and_encode(json.dumps(logprobs_processor.candidate_decoded_tokens)))
+                if logprobs_processor.candidate_token_probs:
+                    rounded_probs = [[round(prob, 4) for prob in sublist] for sublist in req_state.logprobs_processor.candidate_token_probs]
+                    span.set_attribute(SpanAttributes.GEN_AI_CANDIDATE_TOKENS_PROBS,compress_and_encode(json.dumps(rounded_probs)))
 
             # meta
             span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)
