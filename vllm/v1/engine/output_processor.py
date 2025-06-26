@@ -4,9 +4,8 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Union
 import json
-
+from typing import Any, Mapping, Optional, Union
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.tracing import (Tracer, SpanKind, SpanAttributes, extract_trace_context)
@@ -231,7 +230,16 @@ class RequestState:
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None)
 
-
+class SofaTraceInfo:
+    def __init__(self,
+                 sofa_trace_id: Optional[str] = None,
+                 sofa_rpc_id: Optional[str] = None,
+                 request_id: Optional[str] = None,
+                 aigw_app_key_id: Optional[str] = None):
+        self.sofa_trace_id = sofa_trace_id
+        self.sofa_rpc_id = sofa_rpc_id
+        self.request_id = request_id
+        self.aigw_app_key_id = aigw_app_key_id
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
@@ -486,3 +494,31 @@ class OutputProcessor:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
                                    req_state.parent_req.sampling_params.temperature)
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.parent_req.sampling_params.n)
+
+            # inject sofa trace info into span attrs
+            if engine_core_output.trace_headers:
+                sofa_trace_info = self._get_sofa_trace_info(engine_core_output.trace_headers)
+                if sofa_trace_id := sofa_trace_info.sofa_trace_id:
+                    span.set_attribute(SpanAttributes.SOFA_TRACE_ID, sofa_trace_id)
+                if sofa_rpc_id := sofa_trace_info.sofa_rpc_id:
+                    span.set_attribute(SpanAttributes.SOFA_RPC_ID, sofa_rpc_id)
+                if request_id := sofa_trace_info.request_id:
+                    span.set_attribute(SpanAttributes.REQUEST_ID, request_id)
+                if api_key_id := sofa_trace_info.aigw_app_key_id:
+                    span.set_attribute(SpanAttributes.API_KEY_ID, api_key_id)
+
+    def _get_sofa_trace_info(self, parent_trace_headers: Mapping[str, str]) -> Optional[SofaTraceInfo]:
+        """
+        Get SOFA trace id and RPC id from headers
+        """
+        sofa_trace_info = SofaTraceInfo()
+        for (k, v) in parent_trace_headers.items():
+            if k == "SOFA-TraceId":
+                sofa_trace_info.sofa_trace_id = v
+            if k == "SOFA-RpcId":
+                sofa_trace_info.sofa_rpc_id = v
+            if k == "X-Request-ID":
+                sofa_trace_info.request_id = v
+            if k == "X-AIGW-APP-KeyId":
+                sofa_trace_info.aigw_app_key_id = v
+        return sofa_trace_info
