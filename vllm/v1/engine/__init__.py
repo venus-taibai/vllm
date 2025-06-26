@@ -3,7 +3,7 @@
 
 import enum
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -56,6 +56,7 @@ class EngineCoreRequest(
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
     data_parallel_rank: Optional[int]
+    trace_headers: Optional[Mapping[str, str]] = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -108,6 +109,7 @@ class EngineCoreOutput(
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
+    trace_headers: Optional[Mapping[str, str]] = None
 
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0

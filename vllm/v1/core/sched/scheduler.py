@@ -815,6 +815,7 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
 

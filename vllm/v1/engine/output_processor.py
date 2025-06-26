@@ -8,6 +8,7 @@ from typing import Any, Optional, Union
 
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.tracing import (Tracer, SpanKind, SpanAttributes, extract_trace_context)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -242,6 +243,7 @@ class OutputProcessor:
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
+        self.tracer: Optional[Tracer] = None
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -383,7 +385,8 @@ class OutputProcessor:
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
                                                  iteration_stats)
-
+                if self.tracer:
+                    self.do_tracing(engine_core_output, req_state, iteration_stats)
         self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
@@ -426,3 +429,48 @@ class OutputProcessor:
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats,
             req_state.stats.num_generation_tokens)
+
+    def do_tracing(self,
+               engine_core_output: EngineCoreOutput,
+               req_state: RequestState,
+               iteration_stats: Optional[IterationStats]) -> None:
+        """
+        missing span attrs from v0:
+            GEN_AI_RESPONSE_MODEL
+            GEN_AI_LATENCY_TIME_IN_SCHEDULER (to be deprecated)
+            GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD (conditional)
+            GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE (conditional)
+        """
+        assert req_state.stats is not None
+        assert iteration_stats is not None
+        arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
+        trace_context = extract_trace_context(engine_core_output.trace_headers)
+        with self.tracer.start_as_current_span(
+                "llm_request",
+                kind=SpanKind.SERVER,
+                context=trace_context,
+                start_time=arrival_time_nano_seconds) as span:
+            metrics = req_state.stats
+            e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
+            queued_time = metrics.scheduled_ts - metrics.queued_ts
+            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
+            decode_time = metrics.last_token_ts - metrics.first_token_ts
+            inference_time = metrics.last_token_ts - metrics.scheduled_ts
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, metrics.first_token_latency)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, queued_time)
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, len(req_state.prompt_token_ids))
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS, metrics.num_generation_tokens)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time)
+
+            # meta
+            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)
+            if req_state.parent_req and req_state.parent_req.sampling_params:
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.parent_req.sampling_params.top_p)
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
+                                   req_state.parent_req.sampling_params.max_tokens)
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
+                                   req_state.parent_req.sampling_params.temperature)
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.parent_req.sampling_params.n)
