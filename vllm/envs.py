@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR: Optional[str] = None
+    VLLM_DP_POLLING_LOAD_BALANCE_ENABLE: bool = False
 
 
 def get_default_cache_root():
@@ -875,6 +876,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Directory to store expert distribution recorder files.
     "VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR":
     lambda: os.getenv("VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR", None),
+
+    # Enable dp load balance with polling 
+    "VLLM_DP_POLLING_LOAD_BALANCE_ENABLE":
+    lambda: bool(int(os.getenv("VLLM_DP_POLLING_LOAD_BALANCE_ENABLE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

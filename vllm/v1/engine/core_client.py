@@ -34,6 +34,8 @@ from vllm.v1.utils import (CoreEngine, CoreEngineActorManager,
                            CoreEngineProcManager, EngineZmqAddresses,
                            get_engine_client_zmq_addr, wait_for_engine_startup)
 
+import vllm.envs as envs
+
 logger = init_logger(__name__)
 
 AnyFuture = Union[asyncio.Future[Any], Future[Any]]
@@ -923,6 +925,7 @@ class DPAsyncMPClient(AsyncMPClient):
                  log_stats: bool,
                  client_addresses: Optional[dict[str, str]] = None,
                  client_index: int = 0):
+        self.current_engine_index = 0
         self.current_wave = 0
         self.engines_running = False
         # To route aborts to the correct engine.
@@ -1013,6 +1016,11 @@ class DPAsyncMPClient(AsyncMPClient):
         if dp_rank is not None:
             # engines are already in rank order
             return self.core_engines[dp_rank]
+
+        if envs.VLLM_DP_POLLING_LOAD_BALANCE_ENABLE:
+            self.current_engine_index = (self.current_engine_index + 1) % len(
+                self.core_engines)
+            return self.core_engines[self.current_engine_index]
 
         if not self.lb_engines:
             return self.core_engines[0]
