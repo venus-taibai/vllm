@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 import json
+import os
 from typing import Any, Mapping, Optional, Union
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -240,6 +241,18 @@ class SofaTraceInfo:
         self.sofa_rpc_id = sofa_rpc_id
         self.request_id = request_id
         self.aigw_app_key_id = aigw_app_key_id
+
+class EnvInfo:
+    def __init__(self,
+                 pod_ip: Optional[str] = None,
+                 idc: Optional[str] = None,
+                 model_service_id: Optional[str] = None,
+                 model_instance_id: Optional[str] = None):
+        self.pod_ip = pod_ip
+        self.idc = idc
+        self.model_service_id = model_service_id
+        self.model_instance_id = model_instance_id
+
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
@@ -507,6 +520,18 @@ class OutputProcessor:
                 if api_key_id := sofa_trace_info.aigw_app_key_id:
                     span.set_attribute(SpanAttributes.API_KEY_ID, api_key_id)
 
+            # inject metadata from env
+            if env_info := self._get_env_info():
+                if pod_ip := env_info.pod_ip:
+                    span.set_attribute(SpanAttributes.POD_IP, pod_ip)
+                if idc := env_info.idc:
+                    span.set_attribute(SpanAttributes.IDC, idc)
+                if model_instance_id := env_info.model_instance_id:
+                    span.set_attribute(SpanAttributes.MODEL_INSTANCE_ID, model_instance_id)
+                if model_service_id := env_info.model_service_id:
+                    span.set_attribute(SpanAttributes.MODEL_SERVICE_ID, model_service_id)
+
+
     def _get_sofa_trace_info(self, parent_trace_headers: Mapping[str, str]) -> Optional[SofaTraceInfo]:
         """
         Get SOFA trace id and RPC id from headers
@@ -522,3 +547,18 @@ class OutputProcessor:
             if k == "X-AIGW-APP-KeyId":
                 sofa_trace_info.aigw_app_key_id = v
         return sofa_trace_info
+
+    def _get_env_info(self) -> EnvInfo:
+        """
+        Extract metadata from environment
+        """
+        env_info = EnvInfo()
+        if ip := os.getenv("POD_IP"):
+            env_info.pod_ip = ip
+        if idc := os.getenv("ALIPAY_APP_IDC"):
+            env_info.idc = idc
+        if model_service_id := os.getenv("MODEL_SERVICE_ID"):
+            env_info.model_service_id = model_service_id
+        if model_instance_id := os.getenv("MODEL_INSTANCE_ID"):
+            env_info.model_instance_id = model_instance_id
+        return env_info

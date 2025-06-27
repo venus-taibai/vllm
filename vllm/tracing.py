@@ -132,6 +132,10 @@ class SpanAttributes:
     SOFA_RPC_ID = "Parent-RpcId"
     REQUEST_ID = "alipay.aicloud.request_id"
     API_KEY_ID = "alipay.aicloud.api_key_id"
+    POD_IP = "alipay.base.ip"
+    IDC = "alipay.base.idc"
+    MODEL_SERVICE_ID = "alipay.aicloud.model_service_id"
+    MODEL_INSTANCE_ID = "alipay.aicloud.model_instance_id"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
