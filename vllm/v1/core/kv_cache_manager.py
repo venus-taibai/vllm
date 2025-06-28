@@ -7,7 +7,8 @@ from typing import Optional
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
-from vllm.utils import sha256
+from vllm.utils import cdiv, sha256
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens)
@@ -76,6 +77,7 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
     ) -> None:
+        self.num_cpu_blocks = kv_cache_config.num_cpu_blocks
         self.max_model_len = max_model_len
 
         self.enable_caching = enable_caching
@@ -90,6 +92,9 @@ class KVCacheManager:
         ) == 1, "Only one block size is supported for now"
         self.block_size = kv_cache_config.kv_cache_groups[
             0].kv_cache_spec.block_size
+        # We don't cache cpu blocks.
+        self.cpu_block_pool = BlockPool(self.num_cpu_blocks,
+                                        enable_caching=False)
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -103,6 +108,11 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
+        # Mapping from request ID to CPU blocks to track the blocks allocated
+        # for each request, so that we can free the CPU blocks when the request
+        # is finished.
+        self.req_to_cpu_blocks: defaultdict[
+            str, list[KVCacheBlock]] = defaultdict(list)
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
@@ -129,6 +139,30 @@ class KVCacheManager:
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
+
+    def get_request_gpu_blocks(self, request: Request) -> list[KVCacheBlock]:
+        """Get the GPU blocks for the request.
+        Args:
+            request: The request to get the blocks.
+        Returns:
+            A list of blocks that are allocated for the request.
+        """
+        assert request.request_id in self.coordinator.single_type_managers[
+            0].req_to_blocks, (
+                f"Request {request.request_id} is not allocated in gpu blocks")
+        return self.coordinator.single_type_managers[0].req_to_blocks[
+            request.request_id]
+
+    def get_request_cpu_blocks(self, request: Request) -> list[KVCacheBlock]:
+        """Get the CPU blocks for the request.
+        Args:
+            request: The request to get the blocks.
+        Returns:
+            A list of blocks that are allocated for the request.
+        """
+        assert request.request_id in self.req_to_cpu_blocks, (
+            f"Request {request.request_id} is not allocated in cpu blocks")
+        return self.req_to_cpu_blocks[request.request_id]
 
     def get_computed_blocks(self,
                             request: Request) -> tuple[KVCacheBlocks, int]:
@@ -178,6 +212,20 @@ class KVCacheManager:
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
+
+    def allocate_cpu_blocks(self,
+                            request: Request) -> Optional[list[KVCacheBlock]]:
+        num_tokens = request.num_tokens
+        num_required_blocks = cdiv(num_tokens - 1, self.block_size)
+        if (num_required_blocks > self.cpu_block_pool.get_num_free_blocks()):
+            # Cannot allocate new CPU blocks
+            return None
+        allocated_blocks = self.cpu_block_pool.get_new_blocks(
+            num_required_blocks)
+        assert request.request_id not in self.req_to_cpu_blocks, (
+            f"Request {request.request_id} is already allocated in cpu blocks")
+        self.req_to_cpu_blocks[request.request_id] = allocated_blocks
+        return allocated_blocks
 
     def allocate_slots(
         self,
@@ -299,6 +347,18 @@ class KVCacheManager:
             request: The request to free the blocks.
         """
         self.coordinator.free(request.request_id)
+
+    def free_cpu(self, request: Request) -> None:
+        """Free the CPU blocks allocated for the request.
+
+        Args:
+            request: The request to free the blocks.
+        """
+        assert request.request_id in self.req_to_cpu_blocks, (
+            f"Request {request.request_id} is not allocated in cpu blocks")
+        self.cpu_block_pool.free_blocks(
+            self.req_to_cpu_blocks[request.request_id])
+        self.req_to_cpu_blocks.pop(request.request_id, None)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
