@@ -166,6 +166,15 @@ class PrometheusStatLogger(StatLoggerBase):
 
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config, labelnames, labelvalues)
+        
+        # judge whether is PD seperate
+        self.PD_seperate = False
+        try:
+            if self.vllm_config.kv_transfer_config:
+                if self.vllm_config.kv_transfer_config.is_kv_consumer:
+                    self.PD_seperate = True
+        except:
+            self.PD_seperate = False
 
         #
         # Scheduler state
@@ -444,9 +453,18 @@ class PrometheusStatLogger(StatLoggerBase):
             self.histogram_time_per_output_token.observe(tpot)
 
         for finished_request in iteration_stats.finished_requests:
+            if self.PD_seperate:
+                request_avg_tpot_time = ((finished_request.prefill_time + finished_request.decode_time) 
+                                              / finished_request.num_generation_tokens) if finished_request.num_generation_tokens else 0
+            else:
+                if finished_request.num_generation_tokens > 1:
+                    request_avg_tpot_time = finished_request.decode_time / (finished_request.num_generation_tokens - 1)
+                else:
+                    request_avg_tpot_time = 0
+
             self.counter_request_success[finished_request.finish_reason].inc()
             self.histogram_request_avg_tpot_time.observe(
-                finished_request.request_avg_tpot_time)
+                request_avg_tpot_time)
             self.histogram_e2e_time_request.observe(
                 finished_request.e2e_latency)
             self.histogram_queue_time_request.observe(
