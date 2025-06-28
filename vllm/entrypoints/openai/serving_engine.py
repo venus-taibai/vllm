@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import io
+import asyncio
 import json
 import sys
 import time
@@ -578,6 +579,13 @@ class OpenAIServing:
             request.max_tokens = truncated_max_tokens
             if isinstance(request, ChatCompletionRequest):
                 request.max_completion_tokens = truncated_max_tokens
+
+        vllm_config = asyncio.run(self.engine_client.get_vllm_config())
+        if vllm_config.kv_transfer_config is not None and \
+            vllm_config.kv_transfer_config.is_kv_producer:
+            request.max_tokens = 1
+            if isinstance(request, ChatCompletionRequest):
+                request.max_completion_tokens = 1
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
