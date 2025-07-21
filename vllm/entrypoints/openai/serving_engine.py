@@ -582,7 +582,7 @@ class OpenAIServing:
 
         vllm_config = asyncio.run(self.engine_client.get_vllm_config())
         if vllm_config.kv_transfer_config is not None and \
-            vllm_config.kv_transfer_config.is_kv_producer:
+            not vllm_config.kv_transfer_config.is_kv_consumer:
             request.max_tokens = 1
             if isinstance(request, ChatCompletionRequest):
                 request.max_completion_tokens = 1
