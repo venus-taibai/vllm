@@ -224,14 +224,15 @@ class OpenAIServingChat(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
+
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
                                  lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
-
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
+                                 prompt_adapter_request=prompt_adapter_request,
+                                 trace_headers=trace_headers)
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(

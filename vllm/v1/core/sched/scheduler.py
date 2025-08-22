@@ -27,7 +27,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput, IterStats
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -633,6 +633,7 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
+            scheduled_at=time.time(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -785,9 +786,27 @@ class Scheduler(SchedulerInterface):
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
-        logprobs_tensors_for_trace = model_runner_output.logprobs_tensors_for_trace
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+        for r in self.running:
+            if r.sampling_params and r.sampling_params.logprobs_in_trace:
+                t_logprobs = r.sampling_params.logprobs_in_trace
+                if t_logprobs > 0 or t_logprobs == -1:
+                    # open token level profiling
+                    self.vllm_config.observability_config.token_level_profiling = True
+                elif t_logprobs == -2:
+                    # close token level profiling
+                    self.vllm_config.observability_config.token_level_profiling = False
+            else:
+                break
+
+        logprobs_tensors_for_trace = model_runner_output.logprobs_tensors_for_trace
+        iter_batch_size, iter_total_tokens_count, token_output_time = 0, 0, 0.0
+        if self.vllm_config.observability_config.token_level_profiling:
+            iter_batch_size = len(self.running)
+            iter_total_tokens_count = sum(r.num_tokens for r in self.running)
+            token_output_time = time.time()
 
         new_running: list[Request] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
@@ -840,7 +859,6 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            new_logprobs_for_trace = None
             new_token_ids = generated_token_ids
             kv_transfer_params = None
 
@@ -864,8 +882,19 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if logprobs_tensors_for_trace:
-                new_logprobs_for_trace = logprobs_tensors_for_trace.slice(req_index, req_index + 1)
+            iter_stats = (
+                IterStats(
+                    logprobs_tensors_for_trace=(
+                        logprobs_tensors_for_trace.slice(req_index, req_index + 1)
+                        if logprobs_tensors_for_trace else None
+                    ),
+                    iter_total_tokens_count=iter_total_tokens_count,
+                    iter_batch_size=iter_batch_size,
+                    token_scheduled_time=scheduler_output.scheduled_at,
+                    token_output_time=token_output_time,
+                )
+                if self.vllm_config.observability_config.token_level_profiling else None
+            )
 
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
@@ -896,7 +925,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
-                        new_logprobs_for_trace=new_logprobs_for_trace,
+                        iter_stats=iter_stats,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),

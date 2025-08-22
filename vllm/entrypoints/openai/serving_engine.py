@@ -939,6 +939,7 @@ class OpenAIServing:
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        trace_headers: Optional[dict[str, str]] = None,
     ) -> None:
         if self.request_logger is None:
             return
@@ -961,6 +962,7 @@ class OpenAIServing:
             params=params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            trace_headers=trace_headers,
         )
 
     async def _get_trace_headers(

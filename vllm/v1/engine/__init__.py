@@ -13,7 +13,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, IterStats
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -67,6 +67,9 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
 
+    api_server_arrival_time: Optional[float] = None
+    process_input_finish_time: Optional[float] = None
+
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
@@ -103,7 +106,6 @@ class EngineCoreOutput(
     new_token_ids: list[int]
 
     new_logprobs: Optional[LogprobsLists] = None
-    new_logprobs_for_trace: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
 
     finish_reason: Optional[FinishReason] = None
@@ -114,6 +116,8 @@ class EngineCoreOutput(
 
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+
+    iter_stats: Optional[IterStats] = None
 
     @property
     def finished(self) -> bool:

@@ -167,15 +167,16 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 self._log_inputs(request_id_item,
                                  request_prompts[i],
                                  params=sampling_params,
                                  lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 prompt_adapter_request=prompt_adapter_request,
+                                 trace_headers=trace_headers)
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
 
                 # Mypy inconsistently requires this second cast in different
                 # environments. It shouldn't be necessary (redundant from above)

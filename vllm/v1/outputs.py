@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
 import torch
@@ -58,6 +58,15 @@ class LogprobsTensors(NamedTuple):
             logprobs=logprobs,
             selected_token_ranks=selected_token_ranks,
         )
+
+
+@dataclass
+class IterStats:
+    logprobs_tensors_for_trace: Optional[LogprobsLists] = None
+    iter_batch_size: int = 0
+    iter_total_tokens_count: int = 0
+    token_scheduled_time: float = 0.0
+    token_output_time: float = 0.0
 
 
 @dataclass
