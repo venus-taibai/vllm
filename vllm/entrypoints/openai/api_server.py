@@ -51,7 +51,8 @@ from vllm.entrypoints.openai.cli_args import (log_non_default_args,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+from vllm.entrypoints.openai.protocol import (AbortRequest,
+                                              ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               ClassificationRequest,
                                               ClassificationResponse,
@@ -522,6 +523,13 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.post("/abort_request",
+             dependencies=[Depends(validate_json_request)])
+async def abort_request(request: AbortRequest, raw_request: Request):
+    await engine_client(raw_request).abort(request.request_id)
+    return Response(status_code=200)
 
 
 @router.post("/v1/chat/completions",

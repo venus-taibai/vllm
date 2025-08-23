@@ -1012,6 +1012,17 @@ class Scheduler(SchedulerInterface):
                 # Invalid request ID.
                 continue
 
+            if request.is_finished():
+                # If the request is already finished, only FINISHED_ABORTED is
+                # allowed, which is used to force resource cleanup.
+                assert finished_status == RequestStatus.FINISHED_ABORTED, (
+                    "Only FINISHED_ABORTED is allowed for requests that are "
+                    "already finished."
+                )
+                logger.info("Aborting request %s, freeing blocks.", req_id)
+                self._free_blocks(request)
+                continue
+
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
             else:
@@ -1023,7 +1034,13 @@ class Scheduler(SchedulerInterface):
 
         assert request.is_finished()
 
-        delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        if request.status != RequestStatus.FINISHED_ABORTED:
+            delay_free_blocks, kv_xfer_params = \
+                self._connector_finished(request)
+        else:
+            delay_free_blocks = False
+            kv_xfer_params = None
+
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self._cached_reqs_data.pop(request_id, None)
@@ -1158,4 +1175,8 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            # NOTE: If the request was aborted, its blocks were already freed
+            # during the abort process, so the request may no longer exist in
+            # `self.requests`.
+            if req_id in self.requests:
+                self._free_blocks(self.requests[req_id])

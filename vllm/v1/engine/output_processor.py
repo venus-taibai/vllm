@@ -324,7 +324,12 @@ class OutputProcessor:
                 request_ids_to_abort.append(request_id)
             else:
                 parent = self.parent_requests.pop(request_id, None)
-                if parent and parent.child_requests:
+                if parent is None:
+                    # This may occur if the client tries to free the KV blocks
+                    # of finished requests that were previously marked with
+                    # delay_free.
+                    request_ids_to_abort.append(request_id)
+                elif parent and parent.child_requests:
                     self.abort_requests(parent.child_requests)
                     request_ids_to_abort.extend(parent.child_requests)
         return request_ids_to_abort
