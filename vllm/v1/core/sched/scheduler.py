@@ -633,7 +633,6 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
-            scheduled_at=time.time(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

@@ -37,11 +37,16 @@ class ObservableContext:
             )
 
     def _update_iter_stats(self, iter_stats: IterStats, new_token_ids: list[int]) -> None:
+        if not new_token_ids:
+            return
+
         self.not_empty = True
-        self.iter_total_tokens_count.append(iter_stats.iter_total_tokens_count)
-        self.scheduled_time.append(iter_stats.token_scheduled_time)
-        self.token_time.append(iter_stats.token_output_time)
-        self.iter_batch_size.append(iter_stats.iter_batch_size)
+        new_tokens_num = len(new_token_ids)
+        self.iter_total_tokens_count.extend([iter_stats.iter_total_tokens_count] * new_tokens_num)
+        self.scheduled_time.extend([iter_stats.token_scheduled_time] * new_tokens_num)
+        self.token_time.extend([iter_stats.token_output_time] * new_tokens_num)
+        self.iter_batch_size.extend([iter_stats.iter_batch_size] * new_tokens_num)
+        
         if iter_stats.logprobs_tensors_for_trace:
             token_ids_lst, logprobs_lst, ranks_lst = iter_stats.logprobs_tensors_for_trace
             for _, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
