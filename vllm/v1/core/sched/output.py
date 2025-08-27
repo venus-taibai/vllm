@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -159,4 +159,4 @@ class SchedulerOutput:
     # Blocks to swap out. List of GPU -> CPU block number.
     blocks_to_swap_out: list[tuple[int, int]] = None
     # Record the scheduling time point
-    scheduled_at: float = time.time()
+    scheduled_at: float = field(default_factory=time.time)
