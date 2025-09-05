@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import time
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -152,3 +153,10 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    # Blocks to swap in. List of CPU -> GPU block number.
+    blocks_to_swap_in: list[tuple[int, int]] = None
+    # Blocks to swap out. List of GPU -> CPU block number.
+    blocks_to_swap_out: list[tuple[int, int]] = None
+    # Record the scheduling time point
+    scheduled_at: float = field(default_factory=time.time)

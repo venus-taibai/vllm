@@ -80,6 +80,12 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        request_id = f"cmpl-{self._base_request_id(raw_request)}"
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -99,12 +105,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "Echo is unsupported with prompt embeds.")
 
-        request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
 
         try:
             (
@@ -167,15 +168,16 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 self._log_inputs(request_id_item,
                                  request_prompts[i],
                                  params=sampling_params,
                                  lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 prompt_adapter_request=prompt_adapter_request,
+                                 trace_headers=trace_headers)
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
 
                 # Mypy inconsistently requires this second cast in different
                 # environments. It shouldn't be necessary (redundant from above)

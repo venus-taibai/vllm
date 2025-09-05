@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
 import torch
@@ -61,6 +61,15 @@ class LogprobsTensors(NamedTuple):
 
 
 @dataclass
+class IterStats:
+    logprobs_tensors_for_trace: Optional[LogprobsLists] = None
+    iter_batch_size: int = 0
+    iter_total_tokens_count: int = 0
+    token_scheduled_time: float = 0.0
+    token_output_time: float = 0.0
+
+
+@dataclass
 class SamplerOutput:
 
     # [num_reqs, max_num_generated_tokens]
@@ -69,6 +78,7 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
+    logprobs_tensors_for_trace: Optional[LogprobsTensors]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -105,12 +115,15 @@ class ModelRunnerOutput:
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
 
+    logprobs_tensors_for_trace: Optional[LogprobsLists] = None
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
                                               spec_token_ids=None,
                                               logprobs=None,
+                                              logprobs_tensors_for_trace=None,
                                               prompt_logprobs_dict={},
                                               finished_sending=None,
                                               finished_recving=None)

@@ -213,6 +213,7 @@ class Processor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        api_server_arrival_time: Optional[float] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -221,8 +222,6 @@ class Processor:
         self._validate_params(params, lora_request)
         if priority != 0:
             raise ValueError("V1 does not support priority yet.")
-        if trace_headers is not None:
-            raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
             raise ValueError("V1 does not support prompt_adapter_request.")
 
@@ -323,6 +322,7 @@ class Processor:
                     orig_sorted_mm_inputs, sorted_mm_hashes)
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
+        process_input_finish_time = time.time()
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
@@ -336,6 +336,9 @@ class Processor:
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
             data_parallel_rank=data_parallel_rank,
+            trace_headers=trace_headers,
+            api_server_arrival_time=api_server_arrival_time,
+            process_input_finish_time=process_input_finish_time,
         )
 
     def _validate_model_inputs(self,

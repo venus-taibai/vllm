@@ -53,14 +53,25 @@ class RequestStateStats:
 
     num_generation_tokens: int = 0
 
+    # This is api server frontend timestamp (wall-clock)
+    api_server_arrival_time: float = 0.0
+
     # This is a engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
+
+    # This is the timestamp when input processing is finished (wall-clock)
+    process_input_finish_time: float = 0.0
 
     # These are engine core timestamps (monotonic)
     queued_ts: float = 0.0
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
+
+    # first token latency
+    first_token_latency: float = 0.0
+    output_token_queued_latency: float = 0.0
+    output_token_process_latency: float = 0.0
 
 
 @dataclass
@@ -111,6 +122,7 @@ class IterationStats:
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
+            req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 

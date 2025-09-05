@@ -1199,6 +1199,10 @@ class RerankRequest(OpenAIBaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
+class AbortRequest(BaseModel):
+    request_id: str
+
+
 class RerankDocument(BaseModel):
     text: str
 

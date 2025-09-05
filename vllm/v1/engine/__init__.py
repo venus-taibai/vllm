@@ -3,7 +3,7 @@
 
 import enum
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -13,7 +13,7 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, IterStats
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -56,6 +56,7 @@ class EngineCoreRequest(
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
     data_parallel_rank: Optional[int]
+    trace_headers: Optional[Mapping[str, str]] = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -65,6 +66,9 @@ class EngineCoreRequest(
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.
     current_wave: int = 0
+
+    api_server_arrival_time: Optional[float] = None
+    process_input_finish_time: Optional[float] = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -108,9 +112,12 @@ class EngineCoreOutput(
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
+    trace_headers: Optional[Mapping[str, str]] = None
 
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+
+    iter_stats: Optional[IterStats] = None
 
     @property
     def finished(self) -> bool:

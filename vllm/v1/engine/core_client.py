@@ -34,6 +34,8 @@ from vllm.v1.utils import (CoreEngine, CoreEngineActorManager,
                            CoreEngineProcManager, EngineZmqAddresses,
                            get_engine_client_zmq_addr, wait_for_engine_startup)
 
+import vllm.envs as envs
+
 logger = init_logger(__name__)
 
 AnyFuture = Union[asyncio.Future[Any], Future[Any]]
@@ -104,6 +106,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def profile(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+    
+    def expert_distribution_record(self, is_start: bool) -> None:
+        raise NotImplementedError
+    
+    def dump_expert_distribution_record(self) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -854,6 +862,12 @@ class AsyncMPClient(MPClient):
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
 
+    async def expert_distribution_record_async(self, is_start: bool) -> None:
+        await self.call_utility_async("expert_distribution_record", is_start)
+
+    async def dump_expert_distribution_record_async(self) -> None:
+        await self.call_utility_async("dump_expert_distribution_record")
+
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
 
@@ -911,6 +925,7 @@ class DPAsyncMPClient(AsyncMPClient):
                  log_stats: bool,
                  client_addresses: Optional[dict[str, str]] = None,
                  client_index: int = 0):
+        self.current_engine_index = 0
         self.current_wave = 0
         self.engines_running = False
         # To route aborts to the correct engine.
@@ -1001,6 +1016,11 @@ class DPAsyncMPClient(AsyncMPClient):
         if dp_rank is not None:
             # engines are already in rank order
             return self.core_engines[dp_rank]
+
+        if envs.VLLM_DP_POLLING_LOAD_BALANCE_ENABLE:
+            self.current_engine_index = (self.current_engine_index + 1) % len(
+                self.core_engines)
+            return self.core_engines[self.current_engine_index]
 
         if not self.lb_engines:
             return self.core_engines[0]

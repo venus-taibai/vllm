@@ -27,7 +27,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput, IterStats
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -171,6 +171,8 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        blocks_to_swap_in: list[tuple[int, int]] = []
+        blocks_to_swap_out: list[tuple[int, int]] = []
 
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
@@ -247,14 +249,42 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
+                    # In normal cases, preempted requests will be recomputed.
+                    # While in disaggregated-prefill situation, preempted requests
+                    # will be swapped out.
                     preempted_req = self.running.pop()
+                    device_blocks_for_cur_req = self.kv_cache_manager.get_request_gpu_blocks(
+                        preempted_req)
                     self.kv_cache_manager.free(preempted_req)
+                    # Normal preemption by recomputing.
+                    if self.connector is None:
+                        preempted_req.num_computed_tokens = 0
+                    # Disaggregated preemption by swapping out.
+                    # Keep num_computed_tokens the same.
+                    else:
+                        # only kv consumer can swap out
+                        if self.vllm_config.kv_transfer_config is not None \
+                            and self.vllm_config.kv_transfer_config.is_kv_consumer:
+                            cpu_blocks_for_cur_req = self.kv_cache_manager.allocate_cpu_blocks(
+                                preempted_req)
+                            if cpu_blocks_for_cur_req is None:
+                                logger.warning(
+                                    f"Failed to allocate CPU blocks for preempted request {preempted_req.request_id}, abort."
+                                )
+                                preempted_req.status = RequestStatus.FINISHED_ABORTED
+                                can_schedule = False
+                                break
+                            assert len(cpu_blocks_for_cur_req) <= len(
+                                device_blocks_for_cur_req)
+                            for i in range(len(cpu_blocks_for_cur_req)):
+                                blocks_to_swap_out.append(
+                                    (device_blocks_for_cur_req[i].block_id,
+                                    cpu_blocks_for_cur_req[i].block_id))
+
                     preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
-
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -322,6 +352,54 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting[0]
+                # Process swapped out request, only kv consumer can swap out
+                if self.connector and self.vllm_config.kv_transfer_config is not None \
+                    and self.vllm_config.kv_transfer_config.is_kv_consumer \
+                    and request.status == RequestStatus.PREEMPTED:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        1,
+                        new_computed_blocks=None,
+                        num_lookahead_tokens=self.num_lookahead_tokens,
+                    )
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        break
+                    cpu_blocks_for_cur_req = self.kv_cache_manager.get_request_cpu_blocks(
+                        request)
+                    assert len(cpu_blocks_for_cur_req) <= len(
+                        new_blocks.blocks[0])
+                    for i in range(len(cpu_blocks_for_cur_req)):
+                        blocks_to_swap_in.append(
+                            (cpu_blocks_for_cur_req[i].block_id,
+                             new_blocks.blocks[0][i].block_id))
+                    self.kv_cache_manager.free_cpu(request)
+                    # For swapped tokens, we don't need to load kv cache.
+                    self.connector.update_state_after_alloc(
+                        request, new_blocks, 0)
+                    self.waiting.popleft()
+                    if request.use_structured_output:
+                        structured_output_request_ids[
+                            request.request_id] = req_index
+                    req_index += 1
+                    self.running.append(request)
+                    if self.log_stats:
+                        request.record_event(EngineCoreEventType.SCHEDULED,
+                                             scheduled_timestamp)
+                    scheduled_resumed_reqs.append(request)
+                    assert request.lora_request is None, \
+                    "lora is currently not supported in disaggregated prefill"
+                    req_to_new_block_ids[
+                        request.request_id] = new_blocks.get_block_ids()
+                    num_new_tokens = 1
+                    num_scheduled_tokens[request.request_id] = num_new_tokens
+                    token_budget -= num_new_tokens
+                    request.status = RequestStatus.RUNNING
+                    request.num_computed_tokens = request.num_tokens - 1  # The new generated token has not been computed yet.
+
+                    assert not request.has_encoder_inputs, \
+                    "encoder is currently not supported in disaggregated prefill"
+                    continue
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -553,6 +631,8 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -708,6 +788,25 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
+        for r in self.running:
+            if r.sampling_params and r.sampling_params.logprobs_in_trace:
+                t_logprobs = r.sampling_params.logprobs_in_trace
+                if t_logprobs > 0 or t_logprobs == -1:
+                    # open token level profiling
+                    self.vllm_config.observability_config.token_level_profiling = True
+                elif t_logprobs == -2:
+                    # close token level profiling
+                    self.vllm_config.observability_config.token_level_profiling = False
+            else:
+                break
+
+        logprobs_tensors_for_trace = model_runner_output.logprobs_tensors_for_trace
+        iter_batch_size, iter_total_tokens_count, token_output_time = 0, 0, 0.0
+        if self.vllm_config.observability_config.token_level_profiling:
+            iter_batch_size = len(self.running)
+            iter_total_tokens_count = sum(r.num_tokens for r in self.running)
+            token_output_time = time.time()
+
         new_running: list[Request] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -782,6 +881,20 @@ class Scheduler(SchedulerInterface):
                 # the outer lists can be of length > 1.
                 new_logprobs = logprobs.slice(req_index, req_index + 1)
 
+            iter_stats = (
+                IterStats(
+                    logprobs_tensors_for_trace=(
+                        logprobs_tensors_for_trace.slice(req_index, req_index + 1)
+                        if logprobs_tensors_for_trace else None
+                    ),
+                    iter_total_tokens_count=iter_total_tokens_count,
+                    iter_batch_size=iter_batch_size,
+                    token_scheduled_time=scheduler_output.scheduled_at,
+                    token_output_time=token_output_time,
+                )
+                if self.vllm_config.observability_config.token_level_profiling else None
+            )
+
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
                 # NOTE: structured_output_request
@@ -811,10 +924,12 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
+                        iter_stats=iter_stats,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
 
@@ -896,6 +1011,17 @@ class Scheduler(SchedulerInterface):
                 # Invalid request ID.
                 continue
 
+            if request.is_finished():
+                # If the request is already finished, only FINISHED_ABORTED is
+                # allowed, which is used to force resource cleanup.
+                assert finished_status == RequestStatus.FINISHED_ABORTED, (
+                    "Only FINISHED_ABORTED is allowed for requests that are "
+                    "already finished."
+                )
+                logger.info("Aborting request %s, freeing blocks.", req_id)
+                self._free_blocks(request)
+                continue
+
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
             else:
@@ -907,7 +1033,13 @@ class Scheduler(SchedulerInterface):
 
         assert request.is_finished()
 
-        delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        if request.status != RequestStatus.FINISHED_ABORTED:
+            delay_free_blocks, kv_xfer_params = \
+                self._connector_finished(request)
+        else:
+            delay_free_blocks = False
+            kv_xfer_params = None
+
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self._cached_reqs_data.pop(request_id, None)
@@ -1010,11 +1142,12 @@ class Scheduler(SchedulerInterface):
 
         # Now that the blocks are ready, actually cache them.
         (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
-        num_computed_tokens = len(block_ids) * self.block_size
+        num_computed_tokens = request.num_tokens - 1
         # Handle the case where num request tokens less then one block.
         num_computed_tokens = min(num_computed_tokens, request.num_tokens)
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
+        # This will cache the blocks iff caching is enabled.
         self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
 
         # Update the request state for scheduling.
@@ -1041,4 +1174,8 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            # NOTE: If the request was aborted, its blocks were already freed
+            # during the abort process, so the request may no longer exist in
+            # `self.requests`.
+            if req_id in self.requests:
+                self._free_blocks(self.requests[req_id])

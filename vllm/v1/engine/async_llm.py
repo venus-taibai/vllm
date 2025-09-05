@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -21,6 +22,7 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -91,6 +93,7 @@ class AsyncLLM(EngineClient):
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.observability_config = vllm_config.observability_config
         self.log_requests = log_requests
         self.log_stats = log_stats
 
@@ -118,6 +121,11 @@ class AsyncLLM(EngineClient):
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
+        if self.observability_config.otlp_traces_endpoint is not None:
+            tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+            self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
 
@@ -222,6 +230,7 @@ class AsyncLLM(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        request_arrival_time: Optional[float] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -238,7 +247,7 @@ class AsyncLLM(EngineClient):
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             tokenization_kwargs, trace_headers, prompt_adapter_request,
-            priority, data_parallel_rank)
+            priority, data_parallel_rank, request_arrival_time)
 
         if params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -268,7 +277,15 @@ class AsyncLLM(EngineClient):
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            trace_headers = request.trace_headers
+            logger.info("Added request %s traceId: [%s], rpcId: [%s], requestId: [%s],"
+                        " otlpTraceId: [%s], appKeyId: [%s].",
+                        request.request_id,
+                        trace_headers.get("SOFA-TraceId", None) if trace_headers else None,
+                        trace_headers.get("SOFA-RpcId", None) if trace_headers else None,
+                        trace_headers.get("X-Request-ID", None) if trace_headers else None,
+                        trace_headers.get("traceparent", None) if trace_headers else None,
+                        trace_headers.get("X-AIGW-APP-KeyId", None) if trace_headers else None)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -305,7 +322,12 @@ class AsyncLLM(EngineClient):
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
+            request_arrival_time = time.time()
             self._run_output_handler()
+
+            # todo: 使用装饰器修改
+            sampling_params.logprobs_in_trace = self.observability_config.trace_logprobs\
+                if self.observability_config else None
 
             q = await self.add_request(
                 request_id,
@@ -316,6 +338,7 @@ class AsyncLLM(EngineClient):
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                request_arrival_time=request_arrival_time,
             )
 
             # The output_handler task pushes items into the queue.
@@ -473,7 +496,7 @@ class AsyncLLM(EngineClient):
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
-        return False
+        return self.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(
         self,
@@ -492,6 +515,15 @@ class AsyncLLM(EngineClient):
 
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
+
+    async def start_expert_distribution_record(self):
+        await self.engine_core.expert_distribution_record_async(is_start=True)
+
+    async def stop_expert_distribution_record(self):
+        await self.engine_core.expert_distribution_record_async(is_start=False)
+
+    async def dump_expert_distribution_record(self):
+        await self.engine_core.dump_expert_distribution_record_async()
 
     async def reset_mm_cache(self) -> None:
         self.processor.mm_registry.reset_processor_cache()
@@ -528,6 +560,10 @@ class AsyncLLM(EngineClient):
     async def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return await self.engine_core.pin_lora_async(lora_id)
+    
+    async def trace_config(self, logprob: int) -> None:
+        if logprob is not None:
+            self.observability_config.trace_logprobs = logprob
 
     async def collective_rpc(self,
                              method: str,

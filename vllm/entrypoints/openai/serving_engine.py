@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import io
+import asyncio
 import json
 import sys
 import time
@@ -556,21 +557,35 @@ class OpenAIServing:
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = getattr(request, "max_tokens", None)
-        if max_tokens is None:
-            if token_num >= self.max_model_len:
-                raise ValueError(
-                    f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the messages, "
-                    f"Please reduce the length of the messages.")
-        elif token_num + max_tokens > self.max_model_len:
+
+        if token_num >= self.max_model_len:
             raise ValueError(
+                f"This model's maximum context length is "
+                f"{self.max_model_len} tokens. However, you requested "
+                f"{token_num} tokens in the messages, "
+                f"Please reduce the length of the messages.")
+
+        if max_tokens is not None and token_num + max_tokens > self.max_model_len:
+            truncated_max_tokens = self.max_model_len - token_num
+            logger.warning(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
                 f"{max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
                 f"{max_tokens} in the completion). "
-                f"Please reduce the length of the messages or completion.")
+                f"Theta vllm-ascend(530 version) will automatically truncate the "
+                f"output tokens to {truncated_max_tokens} to fit the model's context length. "
+                "This temporary solution will be deprecated after 630.")
+            request.max_tokens = truncated_max_tokens
+            if isinstance(request, ChatCompletionRequest):
+                request.max_completion_tokens = truncated_max_tokens
+
+        vllm_config = asyncio.run(self.engine_client.get_vllm_config())
+        if vllm_config.kv_transfer_config is not None and \
+            not vllm_config.kv_transfer_config.is_kv_consumer:
+            request.max_tokens = 1
+            if isinstance(request, ChatCompletionRequest):
+                request.max_completion_tokens = 1
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -737,6 +752,22 @@ class OpenAIServing:
             for request_prompt_text in request_prompts_text
         ]
 
+        if len(engine_prompts_text) > 1:
+            raise NotImplementedError(
+                "Batching of multiple prompts is not supported for "
+                "completion requests. Please use a single prompt.")
+
+        kv_transfer_params = request.kv_transfer_params
+        if kv_transfer_params is not None and \
+            kv_transfer_params.get("do_remote_prefill", False):
+            last_token_id = kv_transfer_params.get("last_token_id", None)
+            if last_token_id is None:
+                raise ValueError(
+                    "In disaggregated prefill mode, "
+                    "kv_transfer_params must contain the 'last_token_id' key, "
+                    f"but received: {kv_transfer_params}")
+            engine_prompts_text[0]["prompt_token_ids"] += [last_token_id]
+
         # This check is equivalent to simply checking if
         # `request_prompts_embeds` is empty, but it's difficult to propagate
         # overloads to the private helper functions to enable this check.
@@ -847,6 +878,18 @@ class OpenAIServing:
                 prompt=tokenizer.decode(request_prompt),
                 prompt_token_ids=request_prompt)
 
+        prompt_token_ids = prompt_inputs["prompt_token_ids"]
+        kv_transfer_params = request.kv_transfer_params
+        if kv_transfer_params is not None and \
+            kv_transfer_params.get("do_remote_prefill", False):
+            last_token_id = kv_transfer_params.get("last_token_id", None)
+            if last_token_id is None:
+                raise ValueError(
+                    "In disaggregated prefill mode, "
+                    "kv_transfer_params must contain the 'last_token_id' key, "
+                    f"but received: {kv_transfer_params}")
+            prompt_token_ids += [last_token_id]
+
         engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
@@ -896,6 +939,7 @@ class OpenAIServing:
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        trace_headers: Optional[dict[str, str]] = None,
     ) -> None:
         if self.request_logger is None:
             return
@@ -918,6 +962,7 @@ class OpenAIServing:
             params=params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            trace_headers=trace_headers,
         )
 
     async def _get_trace_headers(

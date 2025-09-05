@@ -42,3 +42,6 @@ class SamplingMetadata:
 
     # req_index -> bad_words_token_ids
     bad_words_token_ids: dict[int, list[list[int]]]
+
+    # not none when trace logprobs enabled
+    max_num_logprobs_in_trace: Optional[int] = None

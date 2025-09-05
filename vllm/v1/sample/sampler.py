@@ -35,7 +35,12 @@ class Sampler(nn.Module):
         # TODO(rob): provide option for logprobs post sampling.
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
-        if num_logprobs is not None:
+
+        trace_logprobs = sampling_metadata.max_num_logprobs_in_trace
+        if trace_logprobs is not None and trace_logprobs < 0:
+            trace_logprobs = 0
+
+        if num_logprobs is not None or trace_logprobs:
             raw_logprobs = self.compute_logprobs(logits)
 
         # Use float32 for the logits.
@@ -60,6 +65,9 @@ class Sampler(nn.Module):
         # Get logprobs and rank tensors (if requested)
         logprobs_tensors = None if num_logprobs is None else \
             self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        
+        logprobs_tensors_for_trace = None if not trace_logprobs else \
+            self.gather_logprobs(raw_logprobs, trace_logprobs, token_ids=sampled)
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -71,6 +79,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            logprobs_tensors_for_trace=logprobs_tensors_for_trace,
         )
         return sampler_output
 

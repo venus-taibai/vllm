@@ -51,7 +51,8 @@ from vllm.entrypoints.openai.cli_args import (log_non_default_args,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+from vllm.entrypoints.openai.protocol import (AbortRequest,
+                                              ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               ClassificationRequest,
                                               ClassificationResponse,
@@ -91,7 +92,7 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    with_cancellation)
+                                    track_request_exit, with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
@@ -524,6 +525,13 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
+@router.post("/abort_request",
+             dependencies=[Depends(validate_json_request)])
+async def abort_request(request: AbortRequest, raw_request: Request):
+    await engine_client(raw_request).abort(request.request_id)
+    return Response(status_code=200)
+
+
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)],
              responses={
@@ -544,6 +552,7 @@ async def show_version():
              })
 @with_cancellation
 @load_aware_call
+@track_request_exit
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -583,6 +592,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
              })
 @with_cancellation
 @load_aware_call
+@track_request_exit
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -952,6 +962,18 @@ async def invocations(raw_request: Request):
     return await handler(request, raw_request)
 
 
+@router.post("/trace_config")
+async def trace_config(raw_request: Request):
+    try:
+        data = await raw_request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+    
+    logprob = data.get("logprob", None)
+    logger.info("Modify trace logprobs: %s", logprob)
+    await engine_client(raw_request).trace_config(logprob)
+    return JSONResponse(content={"status": "success"}, status_code=200)
+
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
@@ -970,6 +992,41 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         await engine_client(raw_request).stop_profile()
         logger.info("Profiler stopped.")
         return Response(status_code=200)
+
+
+if envs.VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR:
+    @router.get("/start_expert_distribution_record")
+    async def start_expert_distribution_record(raw_request: Request):
+        """Start recording the expert distribution. Clear the previous record if any."""
+        logger.info("Starting expert distribution record...")
+        await engine_client(raw_request).start_expert_distribution_record()
+        logger.info("Expert distribution record started.")
+        return Response(
+            content="Start recording the expert distribution.\n",
+            status_code=200,
+        )
+
+    @router.get("/stop_expert_distribution_record")
+    async def stop_expert_distribution_record(raw_request: Request):
+        """Stop recording the expert distribution."""
+        logger.info("Stopping expert distribution record...")
+        await engine_client(raw_request).stop_expert_distribution_record()
+        logger.info("Expert distribution record stopped.")
+        return Response(
+            content="Stop recording the expert distribution.\n",
+            status_code=200,
+        )
+
+    @router.get("/dump_expert_distribution_record")
+    async def dump_expert_distribution_record(raw_request: Request):
+        """Dump expert distribution record."""
+        logger.info("Dumping expert distribution record...")
+        await engine_client(raw_request).dump_expert_distribution_record()
+        logger.info("Expert distribution record dumped.")
+        return Response(
+            content="Dump expert distribution record.\n",
+            status_code=200,
+        )
 
 
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
@@ -1189,6 +1246,7 @@ async def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
+        reasoning_padding=args.reasoning_padding,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(

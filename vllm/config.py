@@ -1421,25 +1421,19 @@ class ModelConfig:
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
     def get_and_verify_max_len(self, max_model_len: int):
+        tokenizer_config = try_get_tokenizer_config(
+            self.tokenizer,
+            trust_remote_code=self.trust_remote_code,
+            revision=self.tokenizer_revision)
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
+            tokenizer_config=tokenizer_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
-
-        tokenizer_config = try_get_tokenizer_config(
-            self.tokenizer,
-            trust_remote_code=self.trust_remote_code,
-            revision=self.tokenizer_revision)
-
-        if tokenizer_config is None:
-            return max_model_len
-
-        model_max_length = tokenizer_config.get("model_max_length",
-                                                max_model_len)
-        max_model_len = min(max_model_len, model_max_length)
+        logger.info("Using max model len %s", max_model_len)
         return max_model_len
 
 
@@ -1630,6 +1624,7 @@ class TokenizerPoolConfig:
 
 class LoadFormat(str, enum.Enum):
     AUTO = "auto"
+    PREFETCH_AUTO = "prefetch_auto"
     PT = "pt"
     SAFETENSORS = "safetensors"
     NPCACHE = "npcache"
@@ -1654,6 +1649,10 @@ class LoadConfig:
     """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.\n
+    - "prefetch_auto" like "auto" but performs concurrent mmap with
+    MAP_POPULATE to prefetch weight files into the page cache.
+    This helps maximize storage bandwidth and improve model loading
+    performance, especially on systems with high disk I/O capacity.
     - "pt" will load the weights in the pytorch bin format.\n
     - "safetensors" will load the weights in the safetensors format.\n
     - "npcache" will load the weights in pytorch format and store a numpy cache
@@ -3275,6 +3274,7 @@ def _get_and_verify_dtype(
 
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
+    tokenizer_config: Optional[dict],
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, list[Optional[int]]]],
@@ -3301,7 +3301,7 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
-    # Choose the smallest "max_length" from the possible keys.
+    # Choose the smallest "max_length" from the possible keys
     max_len_key = None
     for key in possible_keys:
         max_len = getattr(hf_config, key, None)
@@ -3323,6 +3323,13 @@ def _get_and_verify_max_len(
             if sliding_window_len_min < derived_max_model_len else max_len_key
         derived_max_model_len = min(derived_max_model_len,
                                     sliding_window_len_min)
+
+    # Consider model_max_length in tokenizer_config
+    if tokenizer_config:
+        tokenizer_model_max_length = tokenizer_config.get(
+            "model_max_length", derived_max_model_len)
+        derived_max_model_len = min(derived_max_model_len,
+                                    tokenizer_model_max_length)
 
     # If none of the keys were found in the config, use a default and
     # log a warning.
@@ -3579,6 +3586,13 @@ class ObservabilityConfig:
     Note that collecting detailed timing information for each request can be
     expensive."""
 
+    token_level_profiling: bool = False
+    """Enable token-level profiling to collect detailed timing information for each token to trace."""
+
+    trace_logprobs: Optional[int] = None
+    """Enable enhanced tracing to display top-N log probabilities (logprobs) in traces.
+    When set to a positive integer N, this parameter activates enhanced tracing functionality """
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
@@ -3623,6 +3637,14 @@ class ObservabilityConfig:
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
+        
+        if (self.trace_logprobs or self.token_level_profiling) and self.otlp_traces_endpoint is None:
+            raise ValueError(
+                "'otlp_traces_endpoint' is not set. Enhanced tracing and token-level profiling cannot be enabled")
+
+        if self.trace_logprobs:
+            self.token_level_profiling = True
+
 
     def _parse_collect_detailed_traces(self):
         assert isinstance(self.collect_detailed_traces, list)

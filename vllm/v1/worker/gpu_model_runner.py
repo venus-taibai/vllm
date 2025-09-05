@@ -1359,6 +1359,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
+        
+        # NOTE: GPU -> CPU Sync happens here.
+        logprobs_tensors_for_trace = sampler_output.logprobs_tensors_for_trace.tolists() \
+            if sampler_output.logprobs_tensors_for_trace is not None else None
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
@@ -1502,6 +1506,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
+            logprobs_tensors_for_trace=logprobs_tensors_for_trace,
             prompt_logprobs_dict=prompt_logprobs_dict,
             finished_sending=finished_sending,
             finished_recving=finished_recving,
@@ -1887,6 +1892,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             min_p=None,
             generators={},
             max_num_logprobs=None,
+            max_num_logprobs_in_trace=None,
             no_penalties=True,
             prompt_token_ids=None,
             frequency_penalties=dummy_tensors(0.1),
