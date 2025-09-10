@@ -63,7 +63,8 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None)
 
         # Scheduling constraints.
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * vllm_config.parallel_config.pipeline_parallel_size
+        self.max_num_per_batch = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
@@ -348,7 +349,8 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+                if len(self.running) == self.max_num_running_reqs or current_batch_size == self.max_num_per_batch:
                     break
 
                 request = self.waiting[0]
