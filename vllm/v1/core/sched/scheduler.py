@@ -200,6 +200,10 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+            if current_batch_size == self.max_num_per_batch:
+                break
+
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
             if (0 < self.scheduler_config.long_prefill_token_threshold <
