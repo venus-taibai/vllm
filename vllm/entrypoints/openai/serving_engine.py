@@ -220,6 +220,7 @@ class OpenAIServing:
         return_tokens_as_token_ids: bool = False,
         enable_force_include_usage: bool = False,
         log_error_stack: bool = False,
+        ignore_user_min_p: bool = False,
     ):
         super().__init__()
 
@@ -238,6 +239,7 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
+        self.ignore_user_min_p = ignore_user_min_p
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
@@ -678,14 +680,6 @@ class OpenAIServing:
                 f"{token_num} input tokens. Please reduce the length of "
                 "the input messages.")
 
-        if (max_tokens is not None
-                and token_num + max_tokens > self.max_model_len):
-            raise ValueError(
-                "'max_tokens' or 'max_completion_tokens' is too large: "
-                f"{max_tokens}. This model's maximum context length is "
-                f"{self.max_model_len} tokens and your request has "
-                f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
-                f" - {token_num}).")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -834,6 +828,18 @@ class OpenAIServing:
                 prompt_token_ids=request_prompt,
             )
 
+        prompt_token_ids = prompt_inputs["prompt_token_ids"]
+        kv_transfer_params = request.kv_transfer_params
+        if kv_transfer_params is not None and \
+            kv_transfer_params.get("do_remote_prefill", False):
+            last_token_id = kv_transfer_params.get("last_token_id", None)
+            if last_token_id is None:
+                raise ValueError(
+                    "In disaggregated prefill mode, "
+                    "kv_transfer_params must contain the 'last_token_id' key, "
+                    f"but received: {kv_transfer_params}")
+            prompt_token_ids += [last_token_id]
+
         engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
         if mm_data is not None:
@@ -912,6 +918,7 @@ class OpenAIServing:
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
+        trace_headers: Optional[dict[str, str]] = None,
     ) -> None:
         if self.request_logger is None:
             return
@@ -931,6 +938,7 @@ class OpenAIServing:
             prompt_embeds,
             params=params,
             lora_request=lora_request,
+            trace_headers=trace_headers,
         )
 
     async def _get_trace_headers(

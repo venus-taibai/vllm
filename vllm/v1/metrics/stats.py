@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
@@ -60,8 +62,18 @@ class RequestStateStats:
 
     num_generation_tokens: int = 0
 
-    # This is an engine frontend timestamp (wall-clock)
+    # This is api server frontend timestamp (wall-clock)
+    api_server_arrival_time: float = 0.0
+
+    # This is a engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
+
+    # This is the timestamp when input processing is finished (wall-clock)
+    process_input_finish_time: float = 0.0
+
+    # These are multimodal loading timestamps
+    mm_load_start_ts: float = 0.0
+    mm_load_end_ts: float = 0.0
 
     # These are engine core timestamps (monotonic)
     queued_ts: float = 0.0
@@ -71,6 +83,10 @@ class RequestStateStats:
 
     # first token latency
     first_token_latency: float = 0.0
+    output_token_queued_latency: float = 0.0
+    output_token_process_latency: float = 0.0
+
+    finished_stats: Optional[FinishedRequestStats] = None
 
 
 @dataclass
@@ -195,6 +211,7 @@ class IterationStats:
                                  inference_time=inference_time,
                                  decode_time=decode_time,
                                  mean_time_per_output_token=mean_time_per_output_token)
+        req_stats.finished_stats = finished_req
         self.finished_requests.append(finished_req)
 
 

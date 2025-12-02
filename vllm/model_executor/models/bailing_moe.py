@@ -39,6 +39,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -76,14 +77,13 @@ class BailingAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         assert self.total_num_heads % tp_size == 0
-        assert self.total_kv_heads % tp_size == 0
         assert self.total_num_heads >= self.total_kv_heads
-
+        
         self.num_heads = self.total_num_heads // tp_size
         self.head_dim = config.head_dim or (self.hidden_size //
                                             self.total_num_heads)
         self.q_size_per_rank = self.head_dim * self.num_heads
-        self.num_kv_heads = self.total_kv_heads // tp_size
+        self.num_kv_heads = max(1, self.total_kv_heads // tp_size)
         self.kv_size_per_rank = self.num_kv_heads * self.head_dim
         self.scale = self.head_dim**-0.5
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
@@ -267,22 +267,6 @@ class BailingMoE(nn.Module):
             # default value for scoring_func
             self.score_function = "softmax"
 
-        self.experts = FusedMoE(
-            num_experts=self.num_experts,
-            top_k=self.top_k,
-            hidden_size=self.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=self.norm_expert_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            scoring_func=self.score_function,
-            e_score_correction_bias=self.gate.expert_bias,
-            num_expert_group=self.n_group,
-            topk_group=self.topk_group,
-            use_grouped_topk=self.use_grouped_topk,
-        )
-
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 intermediate_size = config.moe_shared_expert_intermediate_size
@@ -295,29 +279,64 @@ class BailingMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts")
+            self.experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=self.norm_expert_prob,
+                quant_config=quant_config,
+                use_grouped_topk=self.use_grouped_topk,
+                num_expert_group=self.n_group,
+                topk_group=self.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func=self.score_function,
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=self.routed_scaling_factor,
+                e_score_correction_bias=self.gate.expert_bias,
+            )
         else:
-            self.shared_experts = None
+            self.experts = FusedMoE(
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=self.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=self.norm_expert_prob,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                scoring_func=self.score_function,
+                e_score_correction_bias=self.gate.expert_bias,
+                num_expert_group=self.n_group,
+                topk_group=self.topk_group,
+                use_grouped_topk=self.use_grouped_topk,
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        if self.shared_experts:
-            shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(self.router_dtype))
         router_logits = router_logits.to(hidden_states.dtype)
 
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
-
-        final_hidden_states *= self.routed_scaling_factor
-
-        if self.shared_experts:
-            final_hidden_states = final_hidden_states + shared_output
+        
+        if self.shared_experts is not None:
+            shared_output, final_hidden_states = final_hidden_states
+            assert shared_output is not None
+            final_hidden_states = \
+                final_hidden_states * self.routed_scaling_factor\
+                    + shared_output
+        else:
+            final_hidden_states = final_hidden_states * self.routed_scaling_factor
 
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = (
+                self.experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -596,7 +615,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                     config.vocab_size,
                     config.hidden_size,
                     quant_config=quant_config,
-                    prefix=f"{prefix}.lm_head",
+                    prefix=maybe_prefix(prefix, "lm_head"),
                 )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:

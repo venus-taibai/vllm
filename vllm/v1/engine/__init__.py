@@ -4,7 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import msgspec
 import torch
@@ -14,7 +14,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, IterStats
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -69,6 +69,7 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Optional[Mapping[str, str]] = None
+    metrics: Optional[Mapping[str, object]] = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -76,6 +77,19 @@ class EngineCoreEventType(enum.IntEnum):
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
+    KV_CACHE_TRANSFER_SENDING_FINISHED = 4
+    KV_CACHE_TRANSFER_RECVING_FINSHED = 5
+
+EventMap: Dict[EngineCoreEventType, str] = {
+    EngineCoreEventType.QUEUED: "queued",
+    EngineCoreEventType.SCHEDULED: "scheduled",
+    EngineCoreEventType.PREEMPTED: "preempted",
+    EngineCoreEventType.KV_CACHE_TRANSFER_SENDING_FINISHED: "kv_cache_transfer_sending_finished",
+    EngineCoreEventType.KV_CACHE_TRANSFER_RECVING_FINSHED: "kv_cache_transfer_recving_finished",
+}
+
+def get_event_name(event_type: EngineCoreEventType) -> str:
+    return EventMap.get(event_type, f"unknown_event_{event_type}")
 
 
 class EngineCoreEvent(msgspec.Struct):
@@ -87,13 +101,21 @@ class EngineCoreEvent(msgspec.Struct):
     """
     type: EngineCoreEventType
     timestamp: float
+    wall_clock_timestamp: float
+    attributes: Optional[Dict[str, Any]] = None
 
     @classmethod
     def new_event(cls,
                   event_type: EngineCoreEventType,
-                  timestamp: Optional[float] = None) -> "EngineCoreEvent":
+                  timestamp: Optional[float] = None,
+                  attributes: Optional[Dict[str, Any]] = None) -> "EngineCoreEvent":
+        wall_clock_timestamp = (
+            time.time()
+            if timestamp is None
+            else (time.time() - time.monotonic() + timestamp)
+        )
         timestamp = time.monotonic() if timestamp is None else timestamp
-        return cls(event_type, timestamp)
+        return cls(event_type, timestamp, wall_clock_timestamp, attributes)
 
 
 class EngineCoreOutput(
@@ -118,6 +140,10 @@ class EngineCoreOutput(
     trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    num_local_cached_tokens: int = 0
+    num_external_cached_tokens: int = 0
+
+    iter_stats: Optional[IterStats] = None
 
     @property
     def finished(self) -> bool:

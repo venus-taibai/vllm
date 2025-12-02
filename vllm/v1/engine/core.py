@@ -96,6 +96,9 @@ class EngineCore:
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+        vllm_config.cache_config.num_gpu_tokens = kv_cache_config.num_tokens
+        self.kv_cache_config = kv_cache_config
+
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -145,10 +148,12 @@ class EngineCore:
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
                                                SchedulerOutput]]] = None
+        self.post_step_batch_queue = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
+            self.post_step_batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.request_block_hasher: Optional[Callable[[Request],
                                                      list[BlockHash]]] = None
@@ -165,6 +170,8 @@ class EngineCore:
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
+        self.post_step_fn = (self.post_step if self.post_step_batch_queue is None else
+                        self.post_step_with_batch_queue)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -201,7 +208,7 @@ class EngineCore:
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
             kv_cache_configs)
         num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        num_cpu_blocks = 0
+        num_cpu_blocks = scheduler_kv_cache_config.num_cpu_blocks
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -290,12 +297,23 @@ class EngineCore:
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
-    def post_step(self, model_executed: bool) -> None:
+    def post_step(self, model_executed: bool, outputs) -> None:
         if self.use_spec_decode and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
+    
+    def post_step_with_batch_queue(self, model_executed: bool, outputs) -> None:
+        if self.use_spec_decode and model_executed:
+            # Take the draft token ids.
+            draft_token_ids = self.model_executor.take_draft_token_ids(non_block=True)
+            self.post_step_batch_queue.appendleft(draft_token_ids)
+
+            if outputs is not None:
+                draft_token_ids = self.post_step_batch_queue.pop().result()
+                if draft_token_ids is not None:
+                    self.scheduler.update_draft_token_ids(draft_token_ids)
 
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
@@ -324,7 +342,7 @@ class EngineCore:
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
             future = self.model_executor.execute_model(scheduler_output,
-                                                       non_block=True)
+                                                        non_block=True)
             batch_queue.appendleft(
                 (future, scheduler_output))  # type: ignore[arg-type]
 
@@ -611,6 +629,7 @@ class EngineCoreProc(EngineCore):
 
             # Send ready message.
             num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            num_gpu_tokens = self.kv_cache_config.num_tokens
             # We pass back the coordinator stats update address here for the
             # external LB case for our colocated front-end to use (coordinator
             # only runs with rank 0).
@@ -621,6 +640,7 @@ class EngineCoreProc(EngineCore):
                     "local": local_client,
                     "headless": headless,
                     "num_gpu_blocks": num_gpu_blocks,
+                    "num_gpu_tokens": num_gpu_tokens,
                     "dp_stats_address": dp_stats_address,
                 }))
 
@@ -756,7 +776,7 @@ class EngineCoreProc(EngineCore):
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
         # Post-step hook.
-        self.post_step(model_executed)
+        self.post_step_fn(model_executed, outputs)
 
         return model_executed
 

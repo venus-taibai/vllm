@@ -1,0 +1,31 @@
+hpubms033213201151.wulan01	33.213.201.151	false	-	187C \ 1997G \ 16 hpu/910b	节点有不可调度的污点: scheduling.ops.alipay.com/ide-tmp=true
+hpubms033213202208.wulan01	33.213.202.208	false	-	182C \ 1979G \ 15 hpu/910b	节点有不可调度的污点: scheduling.ops.alipay.com/linkeci=true
+hpubms033213202113.wulan01	33.213.202.113	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213201230.wulan01	33.213.201.230	true	kiminocard	165C \ 1947G \ 16 hpu/910b	-
+hpubms033213200043.wulan01	33.213.200.43	true	alex-jd-3,zzh-antoc3	131C \ 1853G \ 16 hpu/910b	-
+hpubms033213201010.wulan01	33.213.201.10	true	-	177C \ 1961G \ 16 hpu/910b	-
+hpubms033213202168.wulan01	33.213.202.168	true	-	176C \ 1960G \ 16 hpu/910b	-
+hpubms033213200039.wulan01	33.213.200.39	true	-	177C \ 1961G \ 16 hpu/910b	-
+hpubms033213201060.wulan01	33.213.201.60	true	-	172C \ 1959G \ 16 hpu/910b	-
+hpubms033213200092.wulan01	33.213.200.92	true	-	187C \ 1997G \ 16 hpu/910b	-
+hpubms033213200124.wulan01	33.213.200.124	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213200228.wulan01	33.213.200.228	true	antoc-828	166C \ 1947G \ 16 hpu/910b	-
+hpubms033213202059.wulan01	33.213.202.59	true	-	187C \ 1997G \ 16 hpu/910b	-
+hpubms033213202135.wulan01	33.213.202.135	true	-	177C \ 1961G \ 16 hpu/910b	-
+hpubms033213203037.wulan01	33.213.203.37	true	-	187C \ 1997G \ 16 hpu/910b	-
+hpubms033213200096.wulan01	33.213.200.96	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213201077.wulan01	33.213.201.77	true	-	177C \ 1961G \ 16 hpu/910b	-
+hpubms033213201113.wulan01	33.213.201.113	true	antoc-zk-250828	152C \ 1903G \ 16 hpu/910b	-
+hpubms033213201095.wulan01	33.213.201.95	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213201075.wulan01	33.213.201.75	true	-	176C \ 1960G \ 16 hpu/910b	-
+hpubms033213202226.wulan01	33.213.202.226	true	-	172C \ 1943G \ 16 hpu/910b	-
+hpubms033213203104.wulan01	33.213.203.104	true	-	173C \ 1961G \ 16 hpu/910b	-
+hpubms033213201087.wulan01	33.213.201.87	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213202101.wulan01	33.213.202.101	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213201007.wulan01	33.213.201.7	true	-	165C \ 1934G \ 16 hpu/910b	-
+hpubms033213202252.wulan01	33.213.202.252	true	-	182C \ 1979G \ 16 hpu/910b	-
+hpubms033213200033.wulan01	33.213.200.33	true	rkimi3	54C \ 443G	-
+hpubms033213201085.wulan01	33.213.201.85	true	cx_qwen	49C \ 425G	-
+hpubms033213202231.wulan01	33.213.202.231	true	rkimi4	49C \ 425G	-
+hpubms033213202018.wulan01	33.213.202.18	true	-	39C \ 406G	-
+hpubms033213200158.wulan01	33.213.200.158	true	AccuracyTest-Jinqi,fyf-aistudio,yufei_qwen_235b_d1	13C \ 365G	-

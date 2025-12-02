@@ -42,7 +42,7 @@ class StructuredOutputsParams:
     disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
-
+    print('')
     _backend: Optional[str] = field(default=None, init=False)
     """CAUTION: Should only be set by Processor._validate_structured_output"""
     _backend_was_auto: bool = field(default=False, init=False)
@@ -159,6 +159,7 @@ class SamplingParams(
     follows the OpenAI API: The API will always return the log probability of
     the sampled token, so there may be up to `logprobs+1` elements in the
     response. When set to -1, return all `vocab_size` log probabilities."""
+    logprobs_in_trace: Optional[int] = None
     prompt_logprobs: Optional[int] = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""

@@ -203,10 +203,10 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("execute_dummy_batch",
                             unique_reply_rank=self.output_rank)
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self, non_block=False) -> Optional[DraftTokenIds]:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         outputs = self.collective_rpc("take_draft_token_ids",
-                                      unique_reply_rank=self.output_rank)
+                                      unique_reply_rank=self.output_rank, non_block=non_block)
         return outputs[0]
 
     def collective_rpc(self,

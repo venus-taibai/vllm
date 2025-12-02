@@ -171,11 +171,14 @@ class MediaConnector:
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
-            data = await connection.async_get_bytes(
-                url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = await connection.async_get_bytes(
+                    url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except TimeoutError:
+                raise ValueError(f"Timeout while accessing resource '{url}'")
             future = loop.run_in_executor(global_thread_pool,
                                           media_io.load_bytes, data)
             return await future
@@ -437,7 +440,9 @@ def group_mm_kwargs_by_modality(
 
             if device is not None:
                 mm_kwargs_group = json_map_leaves(
-                    lambda x: x.to(device=device),
+                    lambda x: x.to(device=device, non_blocking=True)
+                    if isinstance(x, torch.Tensor)
+                    else x,
                     mm_kwargs_group,
                 )
         else:

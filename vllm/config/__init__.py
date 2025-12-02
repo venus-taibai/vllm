@@ -112,7 +112,8 @@ class VllmConfig:
     structured_outputs_config: StructuredOutputsConfig = field(
         default_factory=StructuredOutputsConfig)
     """Structured outputs configuration."""
-    observability_config: Optional[ObservabilityConfig] = None
+    observability_config: Optional[ObservabilityConfig] = field(
+        default_factory=ObservabilityConfig)
     """Observability configuration."""
     quant_config: Optional[QuantizationConfig] = None
     """Quantization configuration."""

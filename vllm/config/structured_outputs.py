@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic.dataclasses import dataclass
 
@@ -34,6 +34,8 @@ class StructuredOutputsConfig:
     reasoning_parser: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
+    reasoning_padding: Optional[str] = None
+    """Output padding token for reasoning models before generation, e.g. '<think>\n'"""
 
     def compute_hash(self) -> str:
         """

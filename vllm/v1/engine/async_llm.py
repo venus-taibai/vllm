@@ -269,6 +269,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        metrics: Optional[Mapping[str, object]] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -283,7 +284,7 @@ class AsyncLLM(EngineClient):
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+            tokenization_kwargs, trace_headers, priority, data_parallel_rank, metrics=metrics)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -313,7 +314,15 @@ class AsyncLLM(EngineClient):
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            trace_headers = request.trace_headers
+            logger.info("Added request %s traceId: [%s], rpcId: [%s], requestId: [%s],"
+                        " otlpTraceId: [%s], appKeyId: [%s].",
+                        request.request_id,
+                        trace_headers.get("SOFA-TraceId", None) if trace_headers else None,
+                        trace_headers.get("SOFA-RpcId", None) if trace_headers else None,
+                        trace_headers.get("X-Request-ID", None) if trace_headers else None,
+                        trace_headers.get("traceparent", None) if trace_headers else None,
+                        trace_headers.get("X-AIGW-APP-KeyId", None) if trace_headers else None)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -329,6 +338,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        metrics: Optional[Mapping[str, object]] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -356,6 +366,12 @@ class AsyncLLM(EngineClient):
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
+            if metrics is None:
+                metrics = {}
+
+            if "api_server_arrival_time" not in metrics:
+                metrics["api_server_arrival_time"] = time.time()
+
             self._run_output_handler()
 
             tokenization_kwargs: dict[str, Any] = {}
@@ -367,6 +383,9 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs,
             )
 
+            sampling_params.logprobs_in_trace = self.observability_config.trace_logprobs\
+                if self.observability_config else None
+
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -376,6 +395,8 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 tokenization_kwargs=tokenization_kwargs,
                 data_parallel_rank=data_parallel_rank,
+                metrics=metrics,
+                arrival_time=metrics["api_server_arrival_time"],
             )
 
             # The output_handler task pushes items into the queue.
@@ -394,8 +415,8 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
-        except (asyncio.CancelledError, GeneratorExit):
-            await self.abort(request_id)
+        except (asyncio.CancelledError, GeneratorExit) as e:
+            await self.abort(request_id, e)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -414,7 +435,7 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            await self.abort(request_id, e)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -482,12 +503,12 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]], error: BaseException = None) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (request_id, ) if isinstance(
             request_id, str) else as_list(request_id)
-        all_request_ids = self.output_processor.abort_requests(request_ids)
+        all_request_ids = self.output_processor.abort_requests(request_ids, error)
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
@@ -557,8 +578,8 @@ class AsyncLLM(EngineClient):
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
-        except asyncio.CancelledError:
-            await self.abort(request_id)
+        except asyncio.CancelledError as e:
+            await self.abort(request_id, e)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -577,7 +598,7 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            await self.abort(request_id, e)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -657,6 +678,10 @@ class AsyncLLM(EngineClient):
     async def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return await self.engine_core.pin_lora_async(lora_id)
+    
+    async def trace_config(self, logprob: int) -> None:
+        if logprob is not None:
+            self.observability_config.trace_logprobs = logprob
 
     async def collective_rpc(self,
                              method: str,

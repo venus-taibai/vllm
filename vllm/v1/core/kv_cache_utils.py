@@ -1022,11 +1022,13 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
         # Return num_blocks=1 as BlockPool always needs a null_block.
         return KVCacheConfig(
             num_blocks=1,
+            num_tokens=0,
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
         )
 
     # Determine how model runners should initialize the KV cache tensors.
+    page_size = get_uniform_page_size(kv_cache_specs)
     if len(kv_cache_groups) == 1 and \
         isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs):
         # Special case: all layers have the same type of KV cache but with
@@ -1053,7 +1055,6 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        page_size = get_uniform_page_size(kv_cache_specs)
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                     page_size)
@@ -1067,17 +1068,22 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
                 KVCacheTensor(size=page_size * num_blocks,
                               shared_by=shared_by))
 
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=kv_cache_groups,
-    )
+    num_cpu_blocks = int(vllm_config.cache_config.swap_space_bytes //
+                         page_size // len(kv_cache_specs))
 
     min_block_size = min(
         [group.kv_cache_spec.block_size for group in kv_cache_groups])
 
-    # Print the KV cache size and maximum concurrency.
     num_tokens = num_blocks // len(kv_cache_groups) * min_block_size
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        num_cpu_blocks=num_cpu_blocks,
+        num_tokens=num_tokens,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+
     if vllm_config.parallel_config.decode_context_parallel_size > 1:
         num_tokens *= vllm_config.parallel_config.decode_context_parallel_size
         logger.info(
@@ -1285,7 +1291,10 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
     # first `num_blocks` blocks of the tensor.
     min_num_blocks = min(kv_cache_config.num_blocks
                          for kv_cache_config in kv_cache_configs)
+    min_num_tokens = min(kv_cache_config.num_tokens
+                         for kv_cache_config in kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
         kv_cache_config.num_blocks = min_num_blocks
+        kv_cache_config.num_tokens = min_num_tokens
 
     return kv_cache_configs

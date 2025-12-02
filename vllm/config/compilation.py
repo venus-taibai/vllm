@@ -221,6 +221,8 @@ class CompilationConfig:
     from Python, functions can also be passed directly via Python object
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
+    torchair_graph_batch_sizes: list[int] = field(default_factory=list)
+
     # CudaGraph compilation
     cudagraph_mode: Optional[CUDAGraphMode] = None
     """

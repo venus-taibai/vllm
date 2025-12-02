@@ -15,7 +15,7 @@ from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
 from pydantic import TypeAdapter
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          ConversationMessage,
@@ -32,7 +32,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
+    DeltaToolCall, ErrorResponse, FinishedStatsMetadata, FunctionCall, FunctionDefinition,
     PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
@@ -61,6 +61,7 @@ class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
+        vllm_config: VllmConfig,
         model_config: ModelConfig,
         models: OpenAIServingModels,
         response_role: str,
@@ -71,6 +72,7 @@ class OpenAIServingChat(OpenAIServing):
         trust_request_chat_template: bool = False,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
+        reasoning_padding: Optional[str] = None,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
@@ -78,20 +80,25 @@ class OpenAIServingChat(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         log_error_stack: bool = False,
+        log_stats: bool = True,
+        ignore_user_min_p: bool = False,
     ) -> None:
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         enable_force_include_usage=enable_force_include_usage,
-                         log_error_stack=log_error_stack)
-
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            enable_force_include_usage=enable_force_include_usage,
+            log_error_stack=log_error_stack,
+            ignore_user_min_p=ignore_user_min_p,
+        )
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_log_outputs = enable_log_outputs
+        self.log_stats = log_stats
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -100,7 +107,7 @@ class OpenAIServingChat(OpenAIServing):
                 "\"auto\" tool choice has been enabled please note that while"
                 " the parallel_tool_calls client option is preset for "
                 "compatibility reasons, it will be ignored.")
-
+        self.reasoning_padding = reasoning_padding
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
         if reasoning_parser:
@@ -159,11 +166,20 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+        num_speculative_tokens = 0
+        if vllm_config:
+            speculative_config = vllm_config.speculative_config
+            if speculative_config:
+                num_speculative_tokens = speculative_config.num_speculative_tokens
+                if num_speculative_tokens is None:
+                    num_speculative_tokens = 1
+        self.max_model_len -= num_speculative_tokens
 
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
+        vllm_config: Optional[VllmConfig] = None,
     ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
                ErrorResponse]:
         """
@@ -173,6 +189,18 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        arrival_time = time.time()
+
+        request_id = "chatcmpl-" \
+                     f"{self._base_request_id(raw_request, request.request_id)}"
+        request.request_id = request_id
+
+        logger.info("Arrived request %s", request_id)
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -220,6 +248,17 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
 
+            if len(request.messages) == 0:
+                raise ValueError("Empty messages list")
+
+            # Enable chat prefix completion if the role of the last
+            # message in the messages list is assistant
+            if request.messages[-1].get("role") == "assistant":
+                logger.info("Request %s enabled chat prefix completion", request_id)
+                request.continue_final_message = True
+                request.add_generation_prompt = False
+
+            mm_load_start_ts = time.time()
             if not self.use_harmony:
                 # Common case.
                 request_chat_template = request.chat_template
@@ -232,6 +271,7 @@ class OpenAIServingChat(OpenAIServing):
                         "Chat template is passed with request, but "
                         "--trust-request-chat-template is not set. "
                         "Refused request with untrusted chat template.")
+
                 (
                     conversation,
                     request_prompts,
@@ -251,6 +291,8 @@ class OpenAIServingChat(OpenAIServing):
                     tool_parser=tool_parser,
                     add_special_tokens=request.add_special_tokens,
                 )
+
+                
             else:
                 # For GPT-OSS.
                 (
@@ -258,17 +300,11 @@ class OpenAIServingChat(OpenAIServing):
                     request_prompts,
                     engine_prompts,
                 ) = self._make_request_with_harmony(request)
-        except (ValueError, TypeError, RuntimeError,
-                jinja2.TemplateError) as e:
+            mm_load_end_ts = time.time()
+
+        except Exception as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(f"{e} {e.__cause__}")
-
-        request_id = "chatcmpl-" \
-                     f"{self._base_request_id(raw_request, request.request_id)}"
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
+            return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
@@ -283,7 +319,8 @@ class OpenAIServingChat(OpenAIServing):
                     max_model_len=self.max_model_len,
                     request=request,
                     input_length=len(engine_prompt["prompt_token_ids"]),
-                    default_sampling_params=self.default_sampling_params)
+                    default_sampling_params=self.default_sampling_params,
+                    vllm_config=vllm_config)
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
@@ -292,14 +329,21 @@ class OpenAIServingChat(OpenAIServing):
                     sampling_params = request.to_sampling_params(
                         max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
+                    if self.ignore_user_min_p and sampling_params.min_p > 0.0:
+                        logger.warning(
+                            f"Detected min_p={sampling_params.min_p} in request {request_id}, "
+                            f"forcing it to 0.0"
+                        )
+                        sampling_params.min_p = 0.0
+
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request)
-
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
+                                 lora_request=lora_request,
+                                 trace_headers=trace_headers)
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
@@ -316,6 +360,11 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        metrics={
+                            "api_server_arrival_time": arrival_time,
+                            "mm_load_start_ts": mm_load_start_ts,
+                            "mm_load_end_ts": mm_load_end_ts,
+                        },
                     )
 
                 generators.append(generator)
@@ -496,6 +545,7 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
         if self.use_harmony:
             harmony_parsers = [
                 get_streamable_parser_for_assistant()
@@ -570,8 +620,10 @@ class OpenAIServingChat(OpenAIServing):
         else:
             include_usage, include_continuous_usage = False, False
 
+        final_res: Optional[RequestOutput] = None
         try:
             async for res in result_generator:
+                final_res = res
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -582,9 +634,18 @@ class OpenAIServingChat(OpenAIServing):
                 # response (by the try...catch).
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
+                    if self.enable_prompt_tokens_details and num_cached_tokens:
+                        prompt_tokens_details = PromptTokenUsageInfo(
+                            cached_tokens=num_cached_tokens,
+                            l1_cached_tokens=res.num_local_cached_tokens,
+                            l2_cached_tokens=res.num_external_cached_tokens,
+                        )
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
+
+                    first_chunk_padding = self.reasoning_padding
+                    first_chunk_content = f"{first_chunk_padding}\n" if first_chunk_padding else ""
 
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
@@ -593,7 +654,7 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(
                                 role=role,
-                                content="",
+                                content=first_chunk_content,
                             ),
                             logprobs=None,
                             finish_reason=None)
@@ -614,7 +675,9 @@ class OpenAIServingChat(OpenAIServing):
                             chunk.usage = UsageInfo(
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
-                                total_tokens=num_prompt_tokens)
+                                total_tokens=num_prompt_tokens,
+                                prompt_tokens_details=prompt_tokens_details,
+                            )
 
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
@@ -646,7 +709,9 @@ class OpenAIServingChat(OpenAIServing):
                                     chunk.usage = UsageInfo(
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
-                                        total_tokens=num_prompt_tokens)
+                                        total_tokens=num_prompt_tokens,
+                                        prompt_tokens_details=prompt_tokens_details,
+                                    )
 
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
@@ -1094,21 +1159,26 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
-                                        completion_tokens=completion_tokens,
-                                        total_tokens=num_prompt_tokens +
-                                        completion_tokens)
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens)
-
+                final_usage = UsageInfo(
+                    prompt_tokens=num_prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=num_prompt_tokens + completion_tokens,
+                    prompt_tokens_details=prompt_tokens_details,
+                )
+                finished_metadata = (
+                    FinishedStatsMetadata.from_request_output(final_res)
+                    if self.log_stats
+                    else None
+                )
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
                     created=created_time,
                     choices=[],
                     model=model_name,
-                    usage=final_usage)
+                    usage=final_usage,
+                    metadata=finished_metadata,
+                )
                 final_usage_data = (final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
@@ -1184,6 +1254,8 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
+            if self.reasoning_padding and output.text is not None:
+                output.text = f"{self.reasoning_padding}\n{output.text}"
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -1408,16 +1480,24 @@ class OpenAIServingChat(OpenAIServing):
                           num_generated_tokens)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens)
+                cached_tokens=final_res.num_cached_tokens,
+                l1_cached_tokens=final_res.num_local_cached_tokens,
+                l2_cached_tokens=final_res.num_external_cached_tokens,
+            )
 
         request_metadata.final_usage_info = usage
-
+        finished_metadata = (
+            FinishedStatsMetadata.from_request_output(final_res)
+            if self.log_stats
+            else None
+        )
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
+            metadata=finished_metadata,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_ids=(final_res.prompt_token_ids
                               if request.return_token_ids else None),

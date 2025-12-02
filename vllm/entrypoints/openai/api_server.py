@@ -39,7 +39,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (load_chat_template,
@@ -51,7 +51,8 @@ from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+from vllm.entrypoints.openai.protocol import (AbortRequest,
+                                              ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               ClassificationRequest,
                                               ClassificationResponse,
@@ -98,7 +99,8 @@ from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
                                           ToolServer)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    log_non_default_args, with_cancellation)
+                                    log_non_default_args, track_request_exit,
+                                    with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer import MistralTokenizer
@@ -580,6 +582,13 @@ async def cancel_responses(response_id: str, raw_request: Request):
     return JSONResponse(content=response.model_dump())
 
 
+@router.post("/abort_request",
+             dependencies=[Depends(validate_json_request)])
+async def abort_request(request: AbortRequest, raw_request: Request):
+    await engine_client(raw_request).abort(request.request_id)
+    return Response(status_code=200)
+
+
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)],
              responses={
@@ -600,6 +609,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
              })
 @with_cancellation
 @load_aware_call
+@track_request_exit
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -607,7 +617,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
     try:
-        generator = await handler.create_chat_completion(request, raw_request)
+        vllm_config = await engine_client(raw_request).get_vllm_config()
+        generator = await handler.create_chat_completion(
+            request, raw_request, vllm_config)
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                             detail=str(e)) from e
@@ -641,6 +653,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
              })
 @with_cancellation
 @load_aware_call
+@track_request_exit
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -648,7 +661,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             message="The model does not support Completions API")
 
     try:
-        generator = await handler.create_completion(request, raw_request)
+        vllm_config = await engine_client(raw_request).get_vllm_config()
+        generator = await handler.create_completion(request, raw_request,
+                                                    vllm_config)
     except OverflowError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=str(e)) from e
@@ -961,28 +976,58 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
+PydanticVllmConfig = pydantic.TypeAdapter(VllmConfig)
+
+@router.get("/server_info")
+async def show_server_info(
+    raw_request: Request,
+    config_format: Annotated[Literal["text", "json"],
+                                Query()] = "text",
+):
+    vllm_config: VllmConfig = raw_request.app.state.vllm_config
+    server_info = {
+        "vllm_config":
+        str(vllm_config)
+        if config_format == "text" else PydanticVllmConfig.dump_python(
+            vllm_config, mode="json", fallback=str)
+        # fallback=str is needed to handle e.g. torch.dtype
+    }
+    return JSONResponse(content=server_info)
+
+def get_graph_batch_sizes(vllm_config: VllmConfig):
+    if vllm_config.model_config.enforce_eager:
+        return []
+    compilation_config = vllm_config.compilation_config
+    if (
+        compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        and compilation_config.level == CompilationLevel.PIECEWISE
+        and not vllm_config.model_config.enforce_eager
+    ):
+        # ACL Graph
+        return compilation_config.cudagraph_capture_sizes
+    else:
+        # Torchair Graph
+        return compilation_config.torchair_graph_batch_sizes
+
+# Used by AIGW
+@router.get("/simple_server_info")
+async def show_simple_server_info(raw_request: Request):
+    vllm_config: VllmConfig = raw_request.app.state.vllm_config
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    # All fields represent values under single DP; AIGW converts them during use.
+    simple_server_info = {
+        "dp_size": dp_size,
+        "max_running_requests": vllm_config.scheduler_config.max_num_seqs,
+        "page_size": vllm_config.cache_config.block_size,
+        "max_total_tokens": vllm_config.cache_config.num_gpu_tokens // dp_size,
+        "graph_batch_sizes": get_graph_batch_sizes(vllm_config),
+        "chunked_prefill_size": vllm_config.scheduler_config.max_num_batched_tokens
+    }
+    return JSONResponse(content=simple_server_info)
 
 if envs.VLLM_SERVER_DEV_MODE:
     logger.warning("SECURITY WARNING: Development endpoints are enabled! "
                    "This should NOT be used in production!")
-
-    PydanticVllmConfig = pydantic.TypeAdapter(VllmConfig)
-
-    @router.get("/server_info")
-    async def show_server_info(
-        raw_request: Request,
-        config_format: Annotated[Literal["text", "json"],
-                                 Query()] = "text",
-    ):
-        vllm_config: VllmConfig = raw_request.app.state.vllm_config
-        server_info = {
-            "vllm_config":
-            str(vllm_config)
-            if config_format == "text" else PydanticVllmConfig.dump_python(
-                vllm_config, mode="json", fallback=str)
-            # fallback=str is needed to handle e.g. torch.dtype
-        }
-        return JSONResponse(content=server_info)
 
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
@@ -1188,6 +1233,18 @@ async def invocations(raw_request: Request):
     res = base(raw_request).create_error_response(message=msg)
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
+
+@router.post("/trace_config")
+async def trace_config(raw_request: Request):
+    try:
+        data = await raw_request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+    
+    logprob = data.get("logprob", None)
+    logger.info("Modify trace logprobs: %s", logprob)
+    await engine_client(raw_request).trace_config(logprob)
+    return JSONResponse(content={"status": "success"}, status_code=200)
 
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
@@ -1703,6 +1760,7 @@ async def init_app_state(
         tool_parser=args.tool_call_parser,
         tool_server=tool_server,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        reasoning_padding=args.structured_outputs_config.reasoning_padding,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
@@ -1710,6 +1768,7 @@ async def init_app_state(
     ) if "generate" in supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
+        vllm_config,
         model_config,
         state.openai_serving_models,
         args.response_role,
@@ -1723,10 +1782,13 @@ async def init_app_state(
         exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        reasoning_padding=args.structured_outputs_config.reasoning_padding,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
         log_error_stack=args.log_error_stack,
+        log_stats=state.log_stats,
+        ignore_user_min_p=args.ignore_user_min_p,
     ) if "generate" in supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
@@ -1737,6 +1799,8 @@ async def init_app_state(
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         log_error_stack=args.log_error_stack,
+        log_stats=state.log_stats,
+        ignore_user_min_p=args.ignore_user_min_p,
     ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,

@@ -363,6 +363,8 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
+    """The KV cache size in number of tokens"""
+    num_tokens: int
     """How should model runner initialize the KV cache tensors for each layer"""
     kv_cache_tensors: list[KVCacheTensor]
     """
@@ -373,3 +375,5 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+    """The number of KV cache blocks"""
+    num_cpu_blocks: int = 1

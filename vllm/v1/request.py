@@ -110,6 +110,8 @@ class Request:
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
+        self.num_local_cached_tokens = -1
+        self.num_external_cached_tokens = -1
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -192,8 +194,9 @@ class Request:
         self,
         event_type: EngineCoreEventType,
         timestamp: Optional[float] = None,
+        attributes: Optional[dict[str, Any]] = None,
     ) -> None:
-        self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
+        self.events.append(EngineCoreEvent.new_event(event_type, timestamp, attributes))
 
     def take_events(self) -> Optional[list[EngineCoreEvent]]:
         if not self.events:

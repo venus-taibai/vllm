@@ -345,6 +345,7 @@ async def run_batch(
     )
     openai_serving_chat = OpenAIServingChat(
         engine_client,
+        vllm_config,
         model_config,
         openai_serving_models,
         args.response_role,

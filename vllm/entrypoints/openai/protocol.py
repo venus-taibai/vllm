@@ -55,6 +55,7 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
                                   SamplingParams, StructuredOutputsParams)
@@ -142,6 +143,10 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
+    # local_cached_tokens
+    l1_cached_tokens: Optional[int] = None
+    # external_cached_tokens
+    l2_cached_tokens: Optional[int] = None
 
 
 class UsageInfo(OpenAIBaseModel):
@@ -150,6 +155,25 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
 
+
+class FinishedStatsMetadata(OpenAIBaseModel):
+    # all latency fields in milliseconds(ms)
+    e2e_latency: float = 0.0
+    ttft_latency: float = 0.0
+    queue_latency: float = 0.0
+
+    @classmethod
+    def from_request_output(cls, final_res: RequestOutput) -> "FinishedStatsMetadata":
+        finished_stats = final_res.finished_stats
+        if finished_stats is None:
+            logger.error(f"The 'finished_states' field for request {final_res.request_id} is None")
+            return cls()
+        # converts all latency fields from seconds to milliseconds
+        return cls(
+            e2e_latency=finished_stats.e2e_latency * 1000,
+            ttft_latency=finished_stats.prefill_time * 1000,
+            queue_latency=finished_stats.queued_time * 1000,
+        )
 
 class RequestResponseMetadata(BaseModel):
     request_id: str
@@ -1615,6 +1639,10 @@ class RerankRequest(OpenAIBaseModel):
             activation=self.activation)
 
 
+class AbortRequest(BaseModel):
+    request_id: str
+
+
 class RerankDocument(BaseModel):
     text: Optional[str] = None
     multi_modal: Optional[ScoreContentPartParam] = None
@@ -1672,6 +1700,7 @@ class CompletionResponse(OpenAIBaseModel):
                                    "priority"]] = None
     system_fingerprint: Optional[str] = None
     usage: UsageInfo
+    metadata: Optional[FinishedStatsMetadata] = Field(default=None)
 
     # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: Optional[dict[str, Any]] = Field(
@@ -1703,6 +1732,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+    metadata: Optional[FinishedStatsMetadata] = Field(default=None)
 
 
 class EmbeddingResponseData(OpenAIBaseModel):
@@ -1880,6 +1910,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
                                    "priority"]] = None
     system_fingerprint: Optional[str] = None
     usage: UsageInfo
+    metadata: Optional[FinishedStatsMetadata] = Field(default=None)
 
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
@@ -1914,6 +1945,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: Optional[list[int]] = None
+    metadata: Optional[FinishedStatsMetadata] = Field(default=None)
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):

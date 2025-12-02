@@ -6,19 +6,21 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from http import HTTPStatus
 from typing import Any, Optional, Union
 
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import (FlexibleArgumentParser, random_uuid)
 
 logger = init_logger(__name__)
 
@@ -143,6 +145,55 @@ def load_aware_call(func):
     return wrapper
 
 
+async def log_request_exit(request: Request, response: Response):
+    try:
+        request_id = request.state.request_metadata.request_id
+    except AttributeError:
+        dummy_request_id = f"dummy-{random_uuid()}"
+        req_json = await request.json()
+        logger.error(f"No request_id found, using {dummy_request_id} instead: {req_json}")
+
+    status_code = response.status_code
+    if status_code == HTTPStatus.OK.value:
+        logger.info(f"Completed request {request_id}")
+    else:
+        logger.error(f"Failed to handle request {request_id} (status_code: {status_code})")
+
+def track_request_exit(func):
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        raw_request = kwargs.get("raw_request",
+                                 args[1] if len(args) > 1 else None)
+
+        assert raw_request is not None
+
+        try:
+            response = await func(*args, **kwargs)
+        except Exception:
+            raise
+
+        if isinstance(response, (JSONResponse, StreamingResponse)):
+            if response.background is None:
+                response.background = BackgroundTask(log_request_exit,
+                                                     raw_request, response)
+            elif isinstance(response.background, BackgroundTasks):
+                response.background.add_task(log_request_exit,
+                                             raw_request, response)
+            elif isinstance(response.background, BackgroundTask):
+                # Convert the single BackgroundTask to BackgroundTasks
+                # and chain the log_request_exit task to it
+                tasks = BackgroundTasks()
+                tasks.add_task(response.background.func,
+                               *response.background.args,
+                               **response.background.kwargs)
+                tasks.add_task(log_request_exit, raw_request, response)
+                response.background = tasks
+
+        return response
+
+    return wrapper
+
 def cli_env_setup():
     # The safest multiprocessing method is `spawn`, as the default `fork` method
     # is not compatible with some accelerators. The default method will be
@@ -193,17 +244,41 @@ def _validate_truncation_size(
 
 def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
                                                       CompletionRequest],
-                   input_length: int, default_sampling_params: dict) -> int:
+                   input_length: int, default_sampling_params: dict,
+                   vllm_config: Optional[VllmConfig] = None) -> int:
 
-    max_tokens = getattr(request, "max_completion_tokens",
+    user_max_tokens = getattr(request, "max_completion_tokens",
                          None) or request.max_tokens
     default_max_tokens = max_model_len - input_length
-    max_output_tokens = current_platform.get_max_output_tokens(input_length)
+    system_max_tokens = current_platform.get_max_output_tokens(input_length)
 
-    return min(val
-               for val in (default_max_tokens, max_tokens, max_output_tokens,
-                           default_sampling_params.get("max_tokens"))
-               if val is not None)
+    if vllm_config and vllm_config.kv_transfer_config and \
+        not vllm_config.kv_transfer_config.is_kv_consumer:
+        # Force the prefill node to set max_tokens=1
+        return 1
+
+    final_max_token = min(
+        val
+        for val in (
+            default_max_tokens,
+            user_max_tokens,
+            system_max_tokens,
+            default_sampling_params.get("max_tokens"),
+        )
+        if val is not None
+    )
+    if user_max_tokens is not None and final_max_token < user_max_tokens:
+        logger.warning(
+            f"Modified request {request.request_id}: "
+            f"This model's maximum context length is "
+            f"{max_model_len} tokens. However, you requested "
+            f"{user_max_tokens + input_length} tokens "
+            f"({input_length} in the messages, "
+            f"{user_max_tokens} in the completion). "
+            f"Theta vllm-ascend will automatically truncate the "
+            f"output tokens to {final_max_token} to fit the model's context length. ")
+    return final_max_token
+
 
 
 def log_non_default_args(args: Union[Namespace, EngineArgs]):

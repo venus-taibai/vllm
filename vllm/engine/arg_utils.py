@@ -425,6 +425,7 @@ class EngineArgs:
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+    reasoning_padding: Optional[str] = StructuredOutputsConfig.reasoning_padding
     # Deprecated guided decoding fields
     guided_decoding_backend: Optional[str] = None
     guided_decoding_disable_fallback: Optional[bool] = None
@@ -440,6 +441,10 @@ class EngineArgs:
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
         ObservabilityConfig.otlp_traces_endpoint
+    trace_logprobs: Optional[int] = \
+        ObservabilityConfig.trace_logprobs
+    token_level_profiling: bool = \
+        ObservabilityConfig.token_level_profiling
     collect_detailed_traces: Optional[list[DetailedTraceModules]] = \
         ObservabilityConfig.collect_detailed_traces
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
@@ -627,6 +632,9 @@ class EngineArgs:
             # This choice is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **structured_outputs_kwargs["reasoning_parser"])
+        structured_outputs_group.add_argument(
+            "--reasoning-padding",
+            **structured_outputs_kwargs["reasoning_padding"])
         # Deprecated guided decoding arguments
         for arg, type in [
             ("--guided-decoding-backend", str),
@@ -861,6 +869,12 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint",
             **observability_kwargs["otlp_traces_endpoint"])
+        observability_group.add_argument(
+            "--token-level-profiling",
+            **observability_kwargs["token_level_profiling"])
+        observability_group.add_argument("--trace-logprobs",
+            **observability_kwargs["trace_logprobs"])
+        
         # TODO: generalise this special case
         choices = observability_kwargs["collect_detailed_traces"]["choices"]
         metavar = f"{{{','.join(choices)}}}"
@@ -1405,6 +1419,9 @@ class EngineArgs:
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = \
                 self.reasoning_parser
+        if self.reasoning_padding:
+            self.structured_outputs_config.reasoning_padding = \
+                self.reasoning_padding
 
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
@@ -1425,6 +1442,8 @@ class EngineArgs:
             show_hidden_metrics_for_version=(
                 self.show_hidden_metrics_for_version),
             otlp_traces_endpoint=self.otlp_traces_endpoint,
+            token_level_profiling=self.token_level_profiling,
+            trace_logprobs=self.trace_logprobs,
             collect_detailed_traces=self.collect_detailed_traces,
         )
 

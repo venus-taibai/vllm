@@ -93,6 +93,7 @@ class OpenAIServingResponses(OpenAIServing):
         chat_template_content_format: ChatTemplateContentFormatOption,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
+        reasoning_padding: str = "",
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         tool_server: Optional[ToolServer] = None,
@@ -117,6 +118,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
+        self.reasoning_padding = reasoning_padding
         if reasoning_parser:
             try:
                 self.reasoning_parser = (

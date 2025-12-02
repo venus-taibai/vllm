@@ -11,7 +11,7 @@ import jinja2
 from fastapi import Request
 from typing_extensions import assert_never
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
+                                              FinishedStatsMetadata,
                                               PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
@@ -57,6 +58,8 @@ class OpenAIServingCompletion(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         log_error_stack: bool = False,
+        log_stats: bool = True,
+        ignore_user_min_p: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -66,7 +69,9 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             enable_force_include_usage=enable_force_include_usage,
             log_error_stack=log_error_stack,
+            ignore_user_min_p=ignore_user_min_p,
         )
+        self.log_stats = log_stats
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
@@ -83,6 +88,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         request: CompletionRequest,
         raw_request: Optional[Request] = None,
+        vllm_config: Optional[VllmConfig] = None,
     ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -93,6 +99,20 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        arrival_time = time.time()
+        created_time = int(arrival_time)
+
+        request_id = (
+            f"cmpl-"
+            f"{self._base_request_id(raw_request, request.request_id)}")
+        request.request_id = request_id
+
+        logger.info("Arrived request %s", request_id)
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -116,16 +136,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 and request.prompt_embeds is not None):
             return self.create_error_response(
                 "prompt_logprobs is not compatible with prompt embeds.")
-
-        request_id = (
-            f"cmpl-"
-            f"{self._base_request_id(raw_request, request.request_id)}")
-        created_time = int(time.time())
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
-
+        mm_load_start_ts = time.time()
         try:
             lora_request = self._maybe_get_adapters(request)
 
@@ -134,23 +145,39 @@ class OpenAIServingCompletion(OpenAIServing):
             else:
                 tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
-
+            num_speculative_tokens = 0
+            if vllm_config:
+                speculative_config = vllm_config.speculative_config
+                if speculative_config:
+                    num_speculative_tokens = speculative_config.num_speculative_tokens
+                    if num_speculative_tokens is None:
+                        num_speculative_tokens = 1
             engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
-                config=self._build_render_config(request),
+                config=self._build_render_config(request, self.max_model_len - num_speculative_tokens),
             )
+        except Exception as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+        mm_load_end_ts = time.time()
+        
+        if len(engine_prompts) > 1:
+            raise NotImplementedError(
+                "Batching of multiple prompts is not supported for "
+                "completion requests. Please use a single prompt.")
+        try:
+            kv_transfer_params = request.kv_transfer_params
+            if kv_transfer_params is not None and \
+                kv_transfer_params.get("do_remote_prefill", False):
+                last_token_id = kv_transfer_params.get("last_token_id", None)
+                if last_token_id is None:
+                    raise ValueError(
+                        "In disaggregated prefill mode, "
+                        "kv_transfer_params must contain the 'last_token_id' key, "
+                        f"but received: {kv_transfer_params}")
+                engine_prompts[0]["prompt_token_ids"] += [last_token_id]
         except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except RuntimeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except jinja2.TemplateError as e:
-            logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
@@ -183,6 +210,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     request=request,
                     input_length=input_length,
                     default_sampling_params=self.default_sampling_params,
+                    vllm_config=vllm_config,
                 )
 
                 if request.use_beam_search:
@@ -194,18 +222,24 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
                     )
+                    if self.ignore_user_min_p and sampling_params.min_p > 0.0:
+                        logger.warning(
+                            f"Detected min_p={sampling_params.min_p} in request {request_id}, "
+                            f"forcing it to 0.0"
+                        )
+                        sampling_params.min_p = 0.0
 
                 request_id_item = f"{request_id}-{i}"
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 self._log_inputs(
                     request_id_item,
                     engine_prompt,
                     params=sampling_params,
                     lora_request=lora_request,
+                    trace_headers=trace_headers
                 )
-
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
 
                 # Mypy inconsistently requires this second cast in different
                 # environments. It shouldn't be necessary (redundant from above)
@@ -227,6 +261,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        metrics={
+                            "api_server_arrival_time": arrival_time,
+                            "mm_load_start_ts": mm_load_start_ts,
+                            "mm_load_end_ts": mm_load_end_ts,
+                        },
                     )
 
                 generators.append(generator)
@@ -328,6 +367,7 @@ class OpenAIServingCompletion(OpenAIServing):
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
+        prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
         first_iteration = True
 
         stream_options = request.stream_options
@@ -339,14 +379,22 @@ class OpenAIServingCompletion(OpenAIServing):
         else:
             include_usage, include_continuous_usage = False, False
 
+        final_res: Optional[RequestOutput] = None
+
         try:
             async for prompt_idx, res in result_generator:
+                final_res = res
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
-                    first_iteration = False
+                    if self.enable_prompt_tokens_details and num_cached_tokens:
+                        prompt_tokens_details = PromptTokenUsageInfo(
+                            cached_tokens=num_cached_tokens,
+                            l1_cached_tokens=res.num_local_cached_tokens,
+                            l2_cached_tokens=res.num_external_cached_tokens,
+                        )
 
                 prompt_text = res.prompt
                 if prompt_text is None:
@@ -455,10 +503,13 @@ class OpenAIServingCompletion(OpenAIServing):
                             prompt_tokens=prompt_tokens,
                             completion_tokens=completion_tokens,
                             total_tokens=prompt_tokens + completion_tokens,
+                            prompt_tokens_details=prompt_tokens_details if first_iteration else None,
                         )
 
                     response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
+                if first_iteration:
+                    first_iteration = False
 
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
@@ -466,19 +517,22 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
+                prompt_tokens_details=prompt_tokens_details,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens:
-                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens)
-
             if include_usage:
+                finished_metadata = (
+                    FinishedStatsMetadata.from_request_output(final_res)
+                    if self.log_stats
+                    else None
+                )
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
                     model=model_name,
                     choices=[],
                     usage=final_usage_info,
+                    metadata=finished_metadata,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True)
@@ -587,8 +641,15 @@ class OpenAIServingCompletion(OpenAIServing):
         if (self.enable_prompt_tokens_details and last_final_res
                 and last_final_res.num_cached_tokens):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=last_final_res.num_cached_tokens)
-
+                cached_tokens=last_final_res.num_cached_tokens,
+                l1_cached_tokens=last_final_res.num_local_cached_tokens,
+                l2_cached_tokens=last_final_res.num_external_cached_tokens,
+            )
+        finished_metadata = (
+            FinishedStatsMetadata.from_request_output(final_res)
+            if self.log_stats
+            else None
+        )
         request_metadata.final_usage_info = usage
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
@@ -598,6 +659,7 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            metadata=finished_metadata,
             kv_transfer_params=kv_transfer_params,
         )
 
@@ -681,9 +743,9 @@ class OpenAIServingCompletion(OpenAIServing):
         request: CompletionRequest,
         max_input_length: Optional[int] = None,
     ) -> RenderConfig:
-        max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
+        max_model_len = max_input_length if max_input_length else self.max_model_len
         return RenderConfig(
-            max_length=max_input_tokens_len,
+            max_length=max_model_len,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
             add_special_tokens=request.add_special_tokens,
             cache_salt=request.cache_salt,

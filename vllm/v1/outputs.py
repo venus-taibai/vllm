@@ -13,36 +13,49 @@ if TYPE_CHECKING:
 
 
 class LogprobsLists(NamedTuple):
-
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: list[list[int]]
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: list[list[float]]
-    # [num_reqs]
+    # [num_reqs x num_generated_tokens]
     sampled_token_ranks: list[int]
+    # [num_reqs]
+    # Used for slicing the logprobs in cases like speculative
+    # decoding where the number of generated tokens may be
+    # different for each request.
+    cu_num_generated_tokens: list[int] | None = None
 
-    def slice(self, start: int, end: int):
+    def slice(self, start_req_idx: int, end_req_idx: int):
+        if self.cu_num_generated_tokens:
+            start = self.cu_num_generated_tokens[start_req_idx]
+            end = self.cu_num_generated_tokens[end_req_idx]
+        else:
+            start = start_req_idx
+            end = end_req_idx
         return LogprobsLists(
             self.logprob_token_ids[start:end],
             self.logprobs[start:end],
             self.sampled_token_ranks[start:end],
+            self.cu_num_generated_tokens[start_req_idx:end_req_idx]
+            if self.cu_num_generated_tokens
+            else None,
         )
 
 
 class LogprobsTensors(NamedTuple):
-
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: torch.Tensor
-    # [num_reqs]
+    # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
 
-    def tolists(self):
+    def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
             self.logprob_token_ids.tolist(),
             self.logprobs.tolist(),
             self.selected_token_ranks.tolist(),
+            cu_num_generated_tokens,
         )
 
     @staticmethod
@@ -71,6 +84,17 @@ PoolerOutput = Union[torch.Tensor, list[torch.Tensor]]
 
 
 @dataclass
+class IterStats:
+    logprobs_tensors_for_trace: Optional[LogprobsLists] = None
+    iter_batch_size: int = 0
+    iter_waiting_size: int = 0
+    iter_total_tokens_count: int = 0
+    token_scheduled_time: int = 0
+    token_output_time: int = 0
+    num_cached_tokens: int = 0
+
+
+@dataclass
 class SamplerOutput:
 
     # [num_reqs, max_num_generated_tokens]
@@ -79,6 +103,7 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
+    logprobs_tensors_for_trace: Optional[LogprobsTensors] = None
 
 
 @dataclass
@@ -128,6 +153,8 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
+    logprobs_tensors_for_trace: Optional[LogprobsLists] = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
@@ -135,7 +162,7 @@ class AsyncModelRunnerOutput(ABC):
     @abstractmethod
     def get_output(self) -> ModelRunnerOutput:
         """Get the ModelRunnerOutput for this async output.
-        
+
         This is a blocking call that waits until the results are ready, which
         might involve copying device tensors to the host.
         This method should only be called once per AsyncModelRunnerOutput.
@@ -156,6 +183,7 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
                                               logprobs=None,
+                                              logprobs_tensors_for_trace=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
                                               num_nans_in_logits=None)

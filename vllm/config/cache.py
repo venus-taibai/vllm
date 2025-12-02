@@ -107,6 +107,8 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
+    num_gpu_tokens: Optional[int] = field(default=None, init=False)
+    """The number of tokens to allocate for GPU memory."""
 
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
